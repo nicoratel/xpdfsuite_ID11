@@ -20,7 +20,7 @@ DETECTOR_INFO_KEYS = [
     'sensor_material', 'sensor_thickness', 'layout','wavelength','image_width','image_height'
 ]
 
-class EigerData:
+class ID11Data:
     def __init__(self, file_path,verbose=False):
         self.file_path = file_path
         self.h5_file = h5py.File(file_path, 'r')
@@ -34,7 +34,7 @@ class EigerData:
                 self.data = self.h5_file[f'{self.entry}/measurement/frelon3']
             except KeyError:
                 raise KeyError(f"Neither 'measurement/eiger' nor 'measurement/frelon3' found in entry {self.entry}.")
-    
+
         self.nb_frames = self.data.shape[0]
 
         self.positions = self.get_motor_positions()

@@ -1,4 +1,4 @@
-from .eigerdata import EigerData
+from .id11data import ID11Data
 from .pdf_extraction import compute_xPDF
 from pyFAI import load
 import fabio
@@ -17,7 +17,7 @@ def _mask_as_array(mask):
 
 
 
-class XRDProcessor(EigerData):
+class XRDProcessor(ID11Data):
     def __init__(self,
                 image_file,
                 frame='mean',
