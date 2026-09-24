@@ -23,6 +23,8 @@ def process_lost_flow(file,
                       qmax=24,
                       qmaxinst=None,
                       rpoly=0.9,
+                      frame_step=None,
+                      nb_repeats=None,
                       frame_binning=1):
     """
     Process a series of images from a lost-flow experiment, extracting the PDF for each frame.
@@ -59,6 +61,11 @@ def process_lost_flow(file,
         Radius for polynomial fitting.
     frame_binning : int
         Number of consecutive frames to average together for PDF extraction.
+    frame_step : int
+        Step size between consecutive frames in a series. 
+        e.g., if frame_binning=2 and frame_step=4, the first series will be frames 0-1, the second series will be frames 4-5, etc.
+    nb_repeats : int
+        Number of repeats to average together. (None means all repeats that fit in the number of images will be used.)
 
     Returns
     -------
@@ -79,26 +86,54 @@ def process_lost_flow(file,
     if nb_images != nb_images_ref:
         raise ValueError("The number of images in the sample and reference files do not match.")
 
-    # Group consecutive frames by bins of size `frame_binning` (averaged together)
-    nb_bins = nb_images // frame_binning
-    if nb_bins == 0:
-        raise ValueError(f"frame_binning={frame_binning} is larger than the number of images ({nb_images}).")
-    if nb_images % frame_binning != 0:
-        print(f"Warning: {nb_images} images is not a multiple of frame_binning={frame_binning}; "
-              f"the last {nb_images % frame_binning} image(s) will be discarded.")
+    # Paramètres (à ajouter à la signature de la fonction)
+    # frame_binning : nb de frames consécutives moyennées dans une série
+    # frame_step    : décalage (en frames) entre deux répétitions de la série (None = pas de moyenne inter-séries)
+    # nb_repeats    : nb de séries à moyenner (None = toutes celles qui rentrent dans nb_images)
+
+    if frame_step is None:
+        # Comportement actuel : groupes consécutifs uniquement
+        nb_bins = nb_images // frame_binning
+        if nb_bins == 0:
+            raise ValueError(f"frame_binning={frame_binning} is larger than the number of images ({nb_images}).")
+        if nb_images % frame_binning != 0:
+            print(f"Warning: {nb_images} images is not a multiple of frame_binning={frame_binning}; "
+                f"the last {nb_images % frame_binning} image(s) will be discarded.")
+        nb_repeats_eff = 1
+        series_len = nb_images
+    else:
+        if frame_step < frame_binning:
+            raise ValueError(f"frame_step={frame_step} must be >= frame_binning={frame_binning}.")
+        series_len = frame_step
+        max_repeats = nb_images // frame_step
+        nb_repeats_eff = max_repeats if nb_repeats is None else nb_repeats
+        if nb_repeats_eff < 1 or nb_repeats_eff > max_repeats:
+            raise ValueError(f"nb_repeats={nb_repeats} invalid: {nb_images} images with "
+                            f"frame_step={frame_step} allow at most {max_repeats} repeats.")
+        if frame_step % frame_binning != 0:
+            print(f"Warning: frame_step={frame_step} is not a multiple of frame_binning={frame_binning}; "
+                f"the last {frame_step % frame_binning} frame(s) of each series will be discarded.")
+        if nb_images % frame_step != 0 and nb_repeats is None:
+            print(f"Warning: {nb_images % frame_step} trailing image(s) do not form a complete series and will be discarded.")
+        nb_bins = frame_step // frame_binning
 
     if plot:
         plt.figure()
 
     res = {}
     for bin_idx in range(nb_bins):
-        
-        frame_group = list(range(bin_idx * frame_binning, (bin_idx + 1) * frame_binning))
-        frame_arg = frame_group[0] if frame_binning == 1 else frame_group
+        base = bin_idx * frame_binning
+        step = frame_step if frame_step is not None else 0
+        frame_group = [
+            base + k + r * step
+            for r in range(nb_repeats_eff)
+            for k in range(frame_binning)
+        ]
+        frame_arg = frame_group[0] if len(frame_group) == 1 else frame_group
         res[str(frame_group)] = {}
-        # Initialize XRDProcessor for sample and reference data
         print(f"Processing frame group: {frame_group}")
-        sample_processor = XRDProcessor(file, frame=frame_arg, poni_file=poni_file, mask=mask_file, polarization_factor=polarization)
+        sample_processor = XRDProcessor(file, frame=frame_arg, poni_file=poni_file,
+                                        mask=mask_file, polarization_factor=polarization)
         if ref_file is not None:
             ref_processor = XRDProcessor(ref_file, frame=frame_arg, poni_file=poni_file, mask=mask_file, polarization_factor=polarization)
         else:
