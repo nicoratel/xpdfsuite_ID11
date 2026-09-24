@@ -27,8 +27,14 @@ class EigerData:
         self.entry = self.list_entries()[0]  # on prend la première entrée pour l'exemple
         self.eiger_source = self.get_eiger_source()
 
-
-        self.data = self.h5_file[f'{self.entry}/measurement/eiger']
+        try:
+            self.data = self.h5_file[f'{self.entry}/measurement/eiger']
+        except KeyError:
+            try:
+                self.data = self.h5_file[f'{self.entry}/measurement/frelon3']
+            except KeyError:
+                raise KeyError(f"Neither 'measurement/eiger' nor 'measurement/frelon3' found in entry {self.entry}.")
+    
         self.nb_frames = self.data.shape[0]
 
         self.positions = self.get_motor_positions()
@@ -74,8 +80,14 @@ class EigerData:
         - 'real_dataset': chemin du dataset dans le fichier physique
         - 'shape', 'dtype': du dataset vu depuis le fichier de métadonnées
         """
-        
-        ds = self.h5_file[f'{self.entry}/instrument/eiger/image']
+        try:
+            ds = self.h5_file[f'{self.entry}/measurement/eiger']
+        except KeyError:
+            try:
+                ds = self.h5_file[f'{self.entry}/measurement/frelon3']
+            except KeyError:
+                raise KeyError(f"Neither 'measurement/eiger' nor 'measurement/frelon3' found in entry {self.entry}.")
+        #ds = self.h5_file[f'{self.entry}/instrument/eiger/image']
         info = {
             'vds_path': f'{self.entry}/measurement/eiger',
             'shape': ds.shape,
