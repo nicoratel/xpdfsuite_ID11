@@ -44,30 +44,8 @@ pip install pymatgen
 
 ---
 
-#### 3. **HyperSpy** (Explicit)
-Hyperspectral data analysis library, specifically for reading electron diffraction images.
 
-```bash
-pip install hyperspy[mpl,gui]
-```
-
-**Purpose**: 
-- Reads DM4/DM3 files (Gatan diffraction image formats)
-- Handles metadata from electron microscopy files
-- Provides image display and manipulation tools
-
-**Note**: Install with `[mpl,gui]` extras for full functionality.
-
-**Sub-dependencies**:
-- `dask`
-- `scikit-image`
-- `sympy`
-- `h5py`
-- `tqdm`
-
----
-
-#### 4. **Fabio** (Implicit via PyFAI)
+#### 3. **Fabio** (Implicit via PyFAI)
 Supports reading various diffraction image formats.
 
 **Purpose**: Image I/O for multiple diffraction detector formats.
@@ -78,7 +56,7 @@ Supports reading various diffraction image formats.
 
 ### Secondary Dependencies
 
-#### 5. **NumPy** (Implicit)
+#### 4. **NumPy** (Implicit)
 Fundamental numerical computing library.
 
 ```bash
@@ -89,7 +67,7 @@ pip install numpy
 
 ---
 
-#### 6. **SciPy** (Implicit)
+#### 5. **SciPy** (Implicit)
 Scientific computing library.
 
 ```bash
@@ -103,7 +81,7 @@ pip install scipy
 
 ---
 
-#### 7. **Matplotlib** (Implicit)
+#### 6. **Matplotlib** (Implicit)
 Plotting and visualization library.
 
 ```bash
@@ -114,7 +92,7 @@ pip install matplotlib
 
 ---
 
-#### 8. **Scikit-Image** (Implicit via HyperSpy)
+#### 7. **Scikit-Image** 
 Image processing algorithms.
 
 **Purpose**: Image analysis and enhancement.
@@ -140,7 +118,6 @@ Create a `requirements.txt` file with:
 ```
 pyFAI>=0.22.0
 pymatgen>=2022.11.0
-hyperspy[mpl,gui]>=1.7.0
 numpy>=1.20.0
 scipy>=1.7.0
 matplotlib>=3.3.0
@@ -156,8 +133,8 @@ pip install -r requirements.txt
 ### Option 3: Using Conda (Recommended for complex environments)
 
 ```bash
-conda create -n epdf_env python=3.10
-conda activate epdf_env
+conda create -n xpdf_env python=3.10
+conda activate xpdf_env
 conda install -c conda-forge pyfai pymatgen hyperspy numpy scipy matplotlib scikit-image
 ```
 
