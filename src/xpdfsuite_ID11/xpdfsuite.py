@@ -65,21 +65,21 @@ class XRDProcessor(EigerData):
         self.filename = image_file
 
         # Select data using frame keyword: 'mean' for average, or an integer index for a specific frame.
-        if frame == 'mean' and self.nb_frames > 1:
-            self.img = np.mean(self.data, axis=0)
-        elif isinstance(frame, int):
+        if isinstance(frame, str) and frame == 'mean':
+            self.img = np.mean(self.data, axis=0) if self.nb_frames > 1 else self.data[0]
+        elif isinstance(frame, (int, np.integer)):
             if frame < 0 or frame >= self.nb_frames:
                 raise ValueError(f"Frame index {frame} is out of bounds for {self.nb_frames} frames.")
             self.img = self.data[frame]
-        elif isinstance(frame, (list, tuple, np.ndarray)): # cas où on ferait plusieurs frames à la fois, par exemple frame=[0,1,2] pour faire la moyenne des 3 premières frames
+        elif isinstance(frame, (list, tuple, np.ndarray)):
             frames = np.asarray(frame, dtype=int)
             if frames.size == 0:
                 raise ValueError("Frame list is empty.")
             if frames.min() < 0 or frames.max() >= self.nb_frames:
                 raise ValueError(f"Frame indices {frames.tolist()} out of bounds for {self.nb_frames} frames.")
-            self.img = np.mean(self.data[frames.min():frames.max() + 1], axis=0)
+            self.img = np.mean(self.data[frames], axis=0)
         else:
-            raise ValueError(f"Invalid frame specification: {frame}. Expected 'mean' or an integer.")
+            raise ValueError(f"Invalid frame specification: {frame}. Expected 'mean', an integer or a list of integers.")
 
         self.poni_file = poni_file
         # load mask if provided, otherwise create an empty mask
