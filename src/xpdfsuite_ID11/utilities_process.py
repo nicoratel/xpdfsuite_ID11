@@ -169,7 +169,7 @@ def process_lost_flow(file,
         res[str(frame_group)]['G'] = G
         pdf_files.append(outputfile)
         if plot:
-            plt.plot(r, G, label=f'Frame {",".join(map(str, frame_str))}')
+            plt.plot(r, G, label=f'Frame {frame_str}')
     if plot:
         plt.xlabel('r (Å)')
         plt.ylabel('G(r)')
