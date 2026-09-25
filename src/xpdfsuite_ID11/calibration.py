@@ -119,8 +119,8 @@ def perform_geometric_calibration(
     eiger = ID11Data(image_file)
     #detector_info, raw_image = load_image(image_file)
     
-    if eiger.data.ndim == 3:
-        eiger.data = np.mean(eiger.data, axis=0)  # average frames if multiple frames are present:
+    if eiger.data[eiger.entries[0]].ndim == 3:
+        eiger.data = np.mean(eiger.data[eiger.entries[0]], axis=0)  # average frames if multiple frames are present:
 
     # Define output EDF file name
     edffile = os.path.splitext(image_file)[0] + '.edf'
@@ -138,10 +138,10 @@ def perform_geometric_calibration(
     print("=" * 70)
     print('EXPERIMENT SETTINGS TO INPUT IN PYFAI-CALIB2:')
     print('='*70)
-    print(f'Camera description={eiger.detector_info["description"]}')
-    print(f'pixel_size_x={eiger.detector_info["pixel_size"]}X{eiger.detector_info["pixel_size"]}')  # in µmeters
-    print(f'image dimension={eiger.detector_info["image_width"]}X{eiger.detector_info["image_height"]}') # in pixels 
-    #print(f'Electron wavelength={eiger.detector_info["wavelength"]} Å')
+    print(f'Description: {eiger.detector_info[eiger.entries[0]]["description"]}')
+    print(f'pixel_size_x={eiger.detector_info[eiger.entries[0]]["pixel_size"]}X{eiger.detector_info[eiger.entries[0]]["pixel_size"]}')  # in µmeters
+    print(f'image dimension={eiger.detector_info[eiger.entries[0]]["image_width"]}X{eiger.detector_info[eiger.entries[0]]["image_height"]}') # in pixels 
+    #print(f'Electron wavelength={eiger.detector_info[eiger.entries[0]]["wavelength"]} Å')
 
     print('=' * 70 )
     print('Launching pyFAI-calib2')

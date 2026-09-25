@@ -29,7 +29,7 @@ def pseudo_voigt_area(amplitude, fwhm, eta):
     return amplitude * (eta * area_lorentz + (1 - eta) * area_gauss)
 
 
-def fit_peak_pseudovoigt(file, position, window=0.2, plot=True):
+def fit_peak_pseudovoigt(r,G, position=2.9, window=0.2, plot=True):
     """
     Refine a single peak located around `position` (+/- window) with a
     pseudo-Voigt profile using scipy.optimize.curve_fit.
@@ -55,9 +55,9 @@ def fit_peak_pseudovoigt(file, position, window=0.2, plot=True):
         Analytical integrated area of the peak (background excluded), computed
         from the fitted amplitude, fwhm and eta with :func:`pseudo_voigt_area`.
     """
-    x, y =np.loadtxt(file, unpack=True,skiprows=27)
-    x = np.asarray(x)
-    y = np.asarray(y)
+   
+    x = np.asarray(r)
+    y = np.asarray(G)
 
     mask = (x >= position - window) & (x <= position + window)
     xw, yw = x[mask], y[mask]

@@ -1,6 +1,6 @@
 
 import numpy as np
-from .eigerdata import EigerData
+from .id11data import ID11Data
 import fabio
 import os
 import sys
@@ -21,9 +21,9 @@ def draw_mask(image_file):
         Path to the image file.
     """
     # load data and metadata
-    eiger = EigerData(image_file)
-    if eiger.data.ndim == 3:
-        eiger.data = np.mean(eiger.data, axis=0)  # average frames if multiple frames are present:
+    id11 = ID11Data(image_file)
+    if id11.data[id11.entries[0]].ndim == 3:
+        id11.data = np.mean(id11.data[id11.entries[0]], axis=0)  # average frames if multiple frames are present:
     # file extension detection
     extension = os.path.splitext(image_file)[1].lower()
         
@@ -31,7 +31,7 @@ def draw_mask(image_file):
     edffile = image_file.replace(extension, '.edf')
 
     # Create EDF image and save
-    edf_image = fabio.edfimage.EdfImage(data=eiger.data, header=eiger.detector_info)
+    edf_image = fabio.edfimage.EdfImage(data=id11.data, header=id11.detector_info)
     edf_image.write(edffile)
     # edit command to use the same python executable as the current environment (important for pyFAI-drawmask to find the right fabio installation)
     path = shutil.which("pyFAI-drawmask")

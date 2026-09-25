@@ -5,6 +5,7 @@ import fabio
 from matplotlib import pyplot as plt
 from matplotlib.colors import LogNorm
 import numpy as np
+from .id11data import ID11Data
 
 def _mask_as_array(mask):
     """Return a boolean ndarray from a mask that may be a file path or already an ndarray."""
@@ -14,6 +15,7 @@ def _mask_as_array(mask):
         return mask.astype(bool)
     
     return fabio.open(mask).data.astype(bool)
+
 
 
 
@@ -41,21 +43,27 @@ class XRDProcessor(ID11Data):
         ----------
         image_file : str
             Path to the diffraction data file (h5, hdf5, nxs, tif, tiff).
-        entry : str, list/tuple of str, or 'mean', optional
-            Sélectionne la ou les entry(ies) (scans) du fichier à utiliser :
+        entry : str or 'mean', optional
+            Sélectionne l'entry (scan) du fichier à utiliser. Deux options :
 
-            - ``None`` (défaut) : utilise la première entry disponible
-              (``self.entries[0]``), comportement rétro-compatible pour les
-              fichiers à entry unique.
-            - une entry précise, ex. ``'2.1'`` : utilise uniquement cette entry.
-            - une liste/tuple d'entries, ex. ``['2.1', '3.1']`` : concatène les
-              frames de ces entries avant d'appliquer ``frame``.
-            - ``'mean'`` : concatène les frames de **toutes** les entries du
-              fichier avant d'appliquer ``frame``.
+            - une entry unique : ``None`` (défaut, utilise la première entry
+              disponible, ``self.entries[0]``) ou une entry précise, ex.
+              ``'2.1'``. Les frames de cette seule entry sont utilisées.
+            - ``'mean'`` : cas d'un même scan répété sur toutes les entries
+              du fichier (ex. 10 entries x 200 positions). Toutes les entries
+              doivent avoir le même nombre de frames ; elles sont alors
+              moyennées position par position -> on obtient un scan "virtuel"
+              avec le même nombre de frames que chaque entry individuelle,
+              chaque frame étant la moyenne des répétitions à cette position.
+              Si les entries n'ont pas toutes le même nombre de frames, une
+              ``ValueError`` explicite est levée.
 
-            Note : dès que plus d'une entry est sélectionnée, les frames sont
-            chargées en mémoire (plus de lazy-loading h5py) pour pouvoir être
-            concaténées.
+            Dans les deux cas, ``self.entry_str`` donne la représentation en
+            chaîne de caractères de la sélection (l'entry choisie, ou
+            ``'mean'``). ``self.data`` est mis à jour pour pointer vers le
+            tableau 3D (N frames, H, W) effectivement utilisé — la moyenne
+            des entries dans le cas ``'mean'`` (chargée en mémoire), ou le
+            dataset (lazy) de l'entry choisie sinon.
         frame : 'mean', int, or list/tuple/array of int, optional
             Sélectionne la ou les frame(s) au sein des données choisies par
             ``entry`` (mêmes règles qu'auparavant) : 'mean' pour la moyenne,
@@ -85,60 +93,68 @@ class XRDProcessor(ID11Data):
 
         self.filename = image_file
 
-        # ---- sélection de la ou des entry(ies) ----
-        self.entry_arg = entry
-        if entry is None:
-            chosen_entries = [self.entries[0]]
-        elif isinstance(entry, str) and entry == 'mean':
-            chosen_entries = list(self.entries)
+        # ---- sélection de l'entry : entry unique, ou moyenne de toutes les entries ----
+    
+        is_mean_entry = isinstance(entry, str) and entry == 'mean'
+
+        # dict brut {entry: h5py.Dataset} hérité de ID11Data, gardé accessible même
+        # après que self.data soit remplacé ci-dessous par le tableau de frames choisi.
+        self.entries_data = self.data
+
+        if is_mean_entry:
+            # même scan répété sur toutes les entries (ex: 10 entries x 200 positions).
+            # Toutes les entries doivent avoir le même nombre de frames pour pouvoir
+            # être moyennées position par position.
+            nb_frames_per_entry = {e: self.nb_frames[e] for e in self.entries}
+            unique_counts = set(nb_frames_per_entry.values())
+            if len(unique_counts) != 1:
+                raise ValueError(
+                    "entry='mean' nécessite que toutes les entries aient le même nombre de frames "
+                    f"pour être moyennées position par position. Nombres de frames trouvés : {nb_frames_per_entry}."
+                )
+            entries_stack = np.stack(
+                [self.entries_data[e][()] for e in self.entries], axis=0
+            )  # (n_entries, n_frames, H, W)
+            self.data = np.mean(entries_stack, axis=0)  # (n_frames, H, W), remplace le dict hérité
+            self.entry = list(self.entries)
+            self.entry_str = 'mean'
+            if verbose:
+                print(f"entry='mean' : moyenne de {len(self.entries)} entries "
+                      f"({unique_counts.pop()} frames chacune) -> {self.data.shape[0]} frames moyennées.")
+
         elif isinstance(entry, int):
-            entry_str = f'{entry+1}.1'  # convertit un index entier en entry '1.1', '2.1', ...
-            if entry_str not in self.entries:
-                raise ValueError(f"Entrée '{entry_str}' inconnue. Entrées disponibles : {self.entries}")
-            chosen_entries = [entry_str]
-        elif isinstance(entry, (list, tuple)):
-            unknown = [e for e in entry if e not in self.entries]
-            if unknown:
-                raise ValueError(f"Entrée(s) inconnue(s) : {unknown}. Entrées disponibles : {self.entries}")
-            if len(entry) == 0:
-                raise ValueError("La liste d'entries est vide.")
-            chosen_entries = list(entry)
+            self.entry_str = f'{entry+1}.1'  # convertit un index entier en entry '1.1', '2.1', ...
+            if self.entry_str not in self.entries:
+                raise ValueError(f"Entrée '{self.entry_str}' inconnue. Entrées disponibles : {self.entries}")
+            chosen_entry = self.entry_str
+            self.data = self.entries_data[chosen_entry]
         else:
-            if entry not in self.entries:
-                raise ValueError(f"Entrée '{entry}' inconnue. Entrées disponibles : {self.entries}")
-            chosen_entries = [entry]
+            chosen_entry = entry if entry is not None else self.entries[0] # fallback sur la première entry si None
+            if chosen_entry not in self.entries:
+                raise ValueError(f"Entrée '{chosen_entry}' inconnue. Entrées disponibles : {self.entries}")
+            self.data = self.entries_data[chosen_entry]  # h5py.Dataset, reste lazy ; remplace le dict hérité
+            self.entry = chosen_entry
+            self.entry_str = chosen_entry
 
-        self.chosen_entries = chosen_entries
-        # entry "de référence" pour accéder simplement aux métadonnées scalaires
-        # (self.epoch[entry], self.samplename[entry], ...) : la première choisie.
-        self.entry = chosen_entries[0]
+        nb_frames_total = self.data.shape[0]
+        self.nb_frames_entry = nb_frames_total # number of frames in the selected entry or mean of entries
 
-        # ---- empile les frames des entry(ies) choisies en un array 3D (N, H, W) ----
-        if len(chosen_entries) == 1:
-            stacked = self.data[chosen_entries[0]]  # h5py.Dataset, reste lazy
-        else:
-            # plusieurs entries -> concaténation "physique", nécessite un chargement
-            # en mémoire (les tailles d'image doivent être identiques entre entries).
-            stacked = np.concatenate([self.data[e][()] for e in chosen_entries], axis=0)
+        #self.data = self.data[self.entry_str] if not is_mean_entry else self.data  # h5py.Dataset ou ndarray selon le cas
 
-        self.stacked_data = stacked
-        nb_frames_total = stacked.shape[0]
-        self.nb_frames_selected = nb_frames_total
-
-        # ---- sélection de la frame au sein des données empilées (logique inchangée) ----
+        # ---- sélection de la frame au sein des données choisies (logique inchangée) ----
         if isinstance(frame, str) and frame == 'mean':
-            self.img = np.mean(stacked, axis=0) if nb_frames_total > 1 else np.asarray(stacked[0])
+            self.img = np.mean(self.data, axis=0) if nb_frames_total > 1 else np.asarray(self.data[0])
         elif isinstance(frame, (int, np.integer)):
             if frame < 0 or frame >= nb_frames_total:
                 raise ValueError(f"Frame index {frame} is out of bounds for {nb_frames_total} frames.")
-            self.img = np.asarray(stacked[frame])
+            self.img = np.asarray(self.data[frame])
         elif isinstance(frame, (list, tuple, np.ndarray)):
             frames = np.asarray(frame, dtype=int)
             if frames.size == 0:
                 raise ValueError("Frame list is empty.")
             if frames.min() < 0 or frames.max() >= nb_frames_total:
                 raise ValueError(f"Frame indices {frames.tolist()} out of bounds for {nb_frames_total} frames.")
-            self.img = np.mean(np.asarray(stacked)[frames], axis=0)
+            self.img = np.mean(np.asarray(self.data)[frames], axis=0)
         else:
             raise ValueError(f"Invalid frame specification: {frame}. Expected 'mean', an integer or a list of integers.")
 
@@ -190,8 +206,20 @@ class XRDProcessor(ID11Data):
             self.flat = None
         self.polarization_factor = polarization_factor
 
-                   
-
+        # assign metadata for the selected entry (or mean of entries)
+        if is_mean_entry:
+            temp_entry = self.entries[0] # if mean, we assume that metadata are the same for all entries, so we can take the first one
+            self.positions = self.positions[temp_entry]
+            self.scanned_motors = self.scanned_motors[temp_entry]
+            self.times = self.times[temp_entry]
+            self.epoch = self.epoch[temp_entry]
+            self.nb_frames = self.nb_frames[temp_entry]
+        else:
+            self.positions = self.positions[self.entry]
+            self.scanned_motors = self.scanned_motors[self.entry]
+            self.times = self.times[self.entry]
+            self.epoch = self.epoch[self.entry]
+            self.nb_frames = self.nb_frames[self.entry]
 
     def integrate(self, npt=2500, plot=False):
         """
