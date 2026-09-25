@@ -19,27 +19,48 @@ def _mask_as_array(mask):
 
 class XRDProcessor(ID11Data):
     def __init__(self,
-                image_file,
-                frame='mean',
-                poni_file=None,
-                mask=None,
-                dark=None,
-                flat=None,
-                spline=None,
-                polarization_factor=0.99,
-                verbose=False):
+                 image_file,
+                 entry=None,
+                 frame='mean',
+                 poni_file=None,
+                 mask=None,
+                 dark=None,
+                 flat=None,
+                 spline=None,
+                 polarization_factor=0.99,
+                 verbose=False):
         """
-        Initialise an X-ray diffraction data processor.
+        Initialise un processeur de données de diffraction X.
 
-        Loads the image, identifies the detector geometry from the PONI file,
-        optionally applies dark current subtraction and flat-field correction
-        during azimuthal integration, and auto-detects the beam centre via
-        iso-intensity contours.
+        Charge l'image, identifie la géométrie du détecteur depuis le fichier PONI,
+        applique éventuellement la soustraction du courant d'obscurité et la
+        correction de champ plat pendant l'intégration azimutale, et détecte
+        automatiquement le centre du faisceau via des contours iso-intensité.
 
         Parameters
         ----------
         image_file : str
             Path to the diffraction data file (h5, hdf5, nxs, tif, tiff).
+        entry : str, list/tuple of str, or 'mean', optional
+            Sélectionne la ou les entry(ies) (scans) du fichier à utiliser :
+
+            - ``None`` (défaut) : utilise la première entry disponible
+              (``self.entries[0]``), comportement rétro-compatible pour les
+              fichiers à entry unique.
+            - une entry précise, ex. ``'2.1'`` : utilise uniquement cette entry.
+            - une liste/tuple d'entries, ex. ``['2.1', '3.1']`` : concatène les
+              frames de ces entries avant d'appliquer ``frame``.
+            - ``'mean'`` : concatène les frames de **toutes** les entries du
+              fichier avant d'appliquer ``frame``.
+
+            Note : dès que plus d'une entry est sélectionnée, les frames sont
+            chargées en mémoire (plus de lazy-loading h5py) pour pouvoir être
+            concaténées.
+        frame : 'mean', int, or list/tuple/array of int, optional
+            Sélectionne la ou les frame(s) au sein des données choisies par
+            ``entry`` (mêmes règles qu'auparavant) : 'mean' pour la moyenne,
+            un entier pour une frame précise, une liste d'entiers pour la
+            moyenne d'un sous-ensemble de frames.
         poni_file : str, optional
             Path to the pyFAI geometric calibration file (.poni).
             Required for X-ray data.
@@ -47,37 +68,77 @@ class XRDProcessor(ID11Data):
             Path to a fabio mask file (EDF or similar). Convention:
             0 = valid pixel, 1 = masked pixel.
         dark : str or ndarray, optional
-            Dark current image, either as a file path (loaded with
-            :func:`~xpdfsuite.filereader.load_image`) or a numpy array.
-            Passed to ``ai.integrate1d`` as ``dark``. Default is ``None``.
+            Dark current image, either as a file path (loaded with fabio)
+            or a numpy array. Default is ``None``.
         flat : str or ndarray, optional
             Flat-field image, either as a file path or a numpy array.
-            Passed to ``ai.integrate1d`` as ``flat``. Default is ``None``.
+            Default is ``None``.
         spline : str, optional
             Path to a spline file for spline correction.
         verbose : bool, optional
             If ``True``, print metadata and detector info. Default is ``False``.
         """
-        super().__init__(image_file)
-        # héritage de EigerData pour charger data dans self.data (3d array), 
-        # et metadata dans self.positions, self.scanned_motors, self.times, self.epoch, self.nb_frames, self.h5_files
-        
+        super().__init__(image_file, verbose=verbose)
+        # héritage de ID11Data pour charger self.data ({entry: h5py.Dataset}),
+        # et les métadonnées (self.positions, self.scanned_motors, self.times,
+        # self.epoch, self.nb_frames, self.entries, ...), toutes indexées par entry.
+
         self.filename = image_file
 
-        # Select data using frame keyword: 'mean' for average, or an integer index for a specific frame.
+        # ---- sélection de la ou des entry(ies) ----
+        self.entry_arg = entry
+        if entry is None:
+            chosen_entries = [self.entries[0]]
+        elif isinstance(entry, str) and entry == 'mean':
+            chosen_entries = list(self.entries)
+        elif isinstance(entry, int):
+            entry_str = f'{entry+1}.1'  # convertit un index entier en entry '1.1', '2.1', ...
+            if entry_str not in self.entries:
+                raise ValueError(f"Entrée '{entry_str}' inconnue. Entrées disponibles : {self.entries}")
+            chosen_entries = [entry_str]
+        elif isinstance(entry, (list, tuple)):
+            unknown = [e for e in entry if e not in self.entries]
+            if unknown:
+                raise ValueError(f"Entrée(s) inconnue(s) : {unknown}. Entrées disponibles : {self.entries}")
+            if len(entry) == 0:
+                raise ValueError("La liste d'entries est vide.")
+            chosen_entries = list(entry)
+        else:
+            if entry not in self.entries:
+                raise ValueError(f"Entrée '{entry}' inconnue. Entrées disponibles : {self.entries}")
+            chosen_entries = [entry]
+
+        self.chosen_entries = chosen_entries
+        # entry "de référence" pour accéder simplement aux métadonnées scalaires
+        # (self.epoch[entry], self.samplename[entry], ...) : la première choisie.
+        self.entry = chosen_entries[0]
+
+        # ---- empile les frames des entry(ies) choisies en un array 3D (N, H, W) ----
+        if len(chosen_entries) == 1:
+            stacked = self.data[chosen_entries[0]]  # h5py.Dataset, reste lazy
+        else:
+            # plusieurs entries -> concaténation "physique", nécessite un chargement
+            # en mémoire (les tailles d'image doivent être identiques entre entries).
+            stacked = np.concatenate([self.data[e][()] for e in chosen_entries], axis=0)
+
+        self.stacked_data = stacked
+        nb_frames_total = stacked.shape[0]
+        self.nb_frames_selected = nb_frames_total
+
+        # ---- sélection de la frame au sein des données empilées (logique inchangée) ----
         if isinstance(frame, str) and frame == 'mean':
-            self.img = np.mean(self.data, axis=0) if self.nb_frames > 1 else self.data[0]
+            self.img = np.mean(stacked, axis=0) if nb_frames_total > 1 else np.asarray(stacked[0])
         elif isinstance(frame, (int, np.integer)):
-            if frame < 0 or frame >= self.nb_frames:
-                raise ValueError(f"Frame index {frame} is out of bounds for {self.nb_frames} frames.")
-            self.img = self.data[frame]
+            if frame < 0 or frame >= nb_frames_total:
+                raise ValueError(f"Frame index {frame} is out of bounds for {nb_frames_total} frames.")
+            self.img = np.asarray(stacked[frame])
         elif isinstance(frame, (list, tuple, np.ndarray)):
             frames = np.asarray(frame, dtype=int)
             if frames.size == 0:
                 raise ValueError("Frame list is empty.")
-            if frames.min() < 0 or frames.max() >= self.nb_frames:
-                raise ValueError(f"Frame indices {frames.tolist()} out of bounds for {self.nb_frames} frames.")
-            self.img = np.mean(self.data[frames], axis=0)
+            if frames.min() < 0 or frames.max() >= nb_frames_total:
+                raise ValueError(f"Frame indices {frames.tolist()} out of bounds for {nb_frames_total} frames.")
+            self.img = np.mean(np.asarray(stacked)[frames], axis=0)
         else:
             raise ValueError(f"Invalid frame specification: {frame}. Expected 'mean', an integer or a list of integers.")
 
@@ -118,8 +179,8 @@ class XRDProcessor(ID11Data):
             self.dark = self.dark_img.data
             nframes_dark = int(self.dark_img.header.get('nframes', 1))
             print(f"Dark image loaded: {dark} with {nframes_dark} frame(s).")
-            diff = self.img - self.dark/nframes_dark
-            print("Dark subtraction: min:", diff.min(), "  pixels négatifs:", (diff < 0).sum(), "/", diff.size)   
+            diff = self.img - self.dark / nframes_dark
+            print("Dark subtraction: min:", diff.min(), "  pixels négatifs:", (diff < 0).sum(), "/", diff.size)
         else:
             self.dark = None
         if flat is not None:
@@ -128,7 +189,6 @@ class XRDProcessor(ID11Data):
         else:
             self.flat = None
         self.polarization_factor = polarization_factor
-
 
                    
 

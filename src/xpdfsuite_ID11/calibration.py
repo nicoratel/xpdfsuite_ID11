@@ -5,7 +5,7 @@ import fabio
 import os
 import sys
 import numpy as np
-from .eigerdata import EigerData
+from .id11data import ID11Data
 
 def build_calibration_data_from_cif(
     cif_file,
@@ -116,7 +116,7 @@ def perform_geometric_calibration(
     """
     
     # load data and metadata
-    eiger = EigerData(image_file)
+    eiger = ID11Data(image_file)
     #detector_info, raw_image = load_image(image_file)
     
     if eiger.data.ndim == 3:

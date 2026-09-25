@@ -2,6 +2,8 @@ import h5py
 import os
 import hdf5plugin  # nécessaire pour décompresser les images eiger (filtre bitshuffle/lz4)
 import numpy as np
+import re
+
 os.environ['HDF5_PLUGIN_PATH'] = hdf5plugin.PLUGIN_PATH
 
 
@@ -17,79 +19,101 @@ DETECTOR_INFO_KEYS = [
     'description', 'type', 'serial_number',
     'saturation_value', 'bit_depth_image', 'bit_depth_readout',
     'threshold_energy', 'countrate_correction_count_cutoff',
-    'sensor_material', 'sensor_thickness', 'layout','wavelength','image_width','image_height'
+    'sensor_material', 'sensor_thickness', 'layout', 'wavelength', 'image_width', 'image_height'
 ]
 
+
 class ID11Data:
-    def __init__(self, file_path,verbose=False):
+    """Lecteur générique de fichiers ID11 (bliss/NeXus), avec support de 1 à N entries.
+
+    Que le fichier ne contienne qu'un seul scan ou plusieurs, l'API est la même :
+    tous les attributs de métadonnées sont des dictionnaires indexés par entry
+    (ex: 'eiger', 'frelon3'), ex : ``self.data['2.1']``, ``self.nb_frames['2.1']``.
+
+    Pour compatibilité et confort quand il n'y a qu'une entry (ou qu'on veut une
+    entry "par défaut"), ``self.entry`` pointe vers la première entry trouvée.
+    """
+
+    DETECTORS = ('eiger', 'frelon3')
+
+    def __init__(self, file_path, verbose=False):
         self.file_path = file_path
         self.h5_file = h5py.File(file_path, 'r')
-        self.entry = self.list_entries()[0]  # on prend la première entrée pour l'exemple
-        self.eiger_source = self.get_eiger_source()
 
-        try:
-            self.data = self.h5_file[f'{self.entry}/measurement/eiger']
-        except KeyError:
-            try:
-                self.data = self.h5_file[f'{self.entry}/measurement/frelon3']
-            except KeyError:
-                raise KeyError(f"Neither 'measurement/eiger' nor 'measurement/frelon3' found in entry {self.entry}.")
+        # --- entrées et datasets (lazy, h5py.Dataset, pas encore chargés en mémoire) ---
+        self.detector_names = {}   # {entry: 'eiger' | 'frelon3'}
+        self.data = {}             # {entry: h5py.Dataset}
+        self.entries = self.list_entries()
+        if not self.entries:
+            raise KeyError("Aucune entrée avec 'measurement/eiger' ou 'measurement/frelon3'.")
+        for entry in self.entries:
+            name, ds = self._find_detector(entry)
+            self.detector_names[entry] = name
+            self.data[entry] = ds
 
-        self.nb_frames = self.data.shape[0]
+        self.nb_frames = {e: ds.shape[0] for e, ds in self.data.items()}
+        self.total_frames = sum(self.nb_frames.values())
+        # offsets[i] = indice global de la 1re frame de l'entrée i (utile pour get_frame global)
+        self._offsets = np.cumsum([0] + [self.nb_frames[e] for e in self.entries])
 
-        self.positions = self.get_motor_positions()
-        self.scanned_motors = self.positions['measurement'] # {name: value}
+        # --- métadonnées par entrée ---
+        self.eiger_source = {e: self.get_eiger_source(e) for e in self.entries}
+        self.positions = {e: self.get_motor_positions(e) for e in self.entries}
+        self.scanned_motors = {e: p['measurement'] for e, p in self.positions.items()}
+        self.times = {e: self.get_time_metadata(e) for e in self.entries}
+        self.epoch = {e: t.get('epoch_trig') for e, t in self.times.items()}
+        self.samplename = {e: t.get('sample_name') for e, t in self.times.items()}
+        self.command = {e: t.get('title') for e, t in self.times.items()}
+        self.detector_info = {e: self.get_detector_info(e) for e in self.entries}
 
-        # vérification que le nombre de poinst scannés sur au moins 1 moteur correspond au nombre de frames eiger
+        # entry "par défaut" : la première trouvée (comportement rétro-compatible
+        # pour du code qui suppose une seule entry, ex: self.entry, self.epoch[self.entry]...)
+        self.entry = self.entries[0]
+
         if verbose:
-            for motor, value in self.positions['measurement'].items():
-                if value.shape[0] == self.nb_frames:
-                    print(f"Le nombre de points scannés sur le moteur {motor} correspond au nombre de frames eiger.")
-                if len(self.positions['measurement']) > 1:
-                    print(f"Les moteurs {', '.join(self.positions['measurement'].keys())} ont été scannés.")
-                    # Calcul du nobmre de points scannés sur chaque moteur
-                    for motor, value in self.positions['measurement'].items():
-                        print(f"Nombre de points scannés sur le moteur {motor}: {value.shape[0]}")
-                    # le produit doit être égale au nombre de frames eiger
-                    product = 1
-                    for motor, value in self.positions['measurement'].items():
-                        product *= value.shape[0]
-                    if product == self.nb_frames:
-                        print(f"Le produit du nombre de points scannés sur chaque moteur ({product}) correspond au nombre de frames eiger ({self.nb_frames}).")
-        self.times = self.get_time_metadata()
-        self.epoch = self.times['epoch_trig'] if 'epoch_trig' in self.times else None
-        self.samplename = self.times['sample_name'] if 'sample_name' in self.times else None
-        self.command = self.times['title'] if 'title' in self.times else None
+            self._check_scan_consistency()
 
-        self.detector_info = self.get_detector_info()
-
+    # ------------------------------------------------------------------
+    def _find_detector(self, entry):
+        for name in self.DETECTORS:
+            path = f'{entry}/measurement/{name}'
+            if path in self.h5_file:
+                return name, self.h5_file[path]
+        raise KeyError(f"Neither 'measurement/eiger' nor 'measurement/frelon3' found in entry {entry}.")
 
     def list_entries(self):
-        """Liste les numéros d'entrée (scans) présents dans le fichier, ex: ['1.1', '2.1', ...]."""
-       
-        return list(self.h5_file.keys())
+        """Liste les entrées (scans) contenant un détecteur, triées numériquement
+        ('2.1' avant '10.1')."""
+        def key(k):
+            return tuple(int(x) for x in re.findall(r'\d+', k))
+        entries = []
+        for k in sorted(self.h5_file.keys(), key=key):
+            if any(f'{k}/measurement/{d}' in self.h5_file for d in self.DETECTORS):
+                entries.append(k)
+        return entries
 
+    # ------------------------------------------------------------------
+    def get_frame(self, index, entry=None):
+        """Si entry est donnée : frame `index` de cette entrée.
+        Sinon : `index` est un indice global sur toutes les entrées concaténées."""
+        if entry is not None:
+            return self.data[entry][index]
+        if not 0 <= index < self.total_frames:
+            raise IndexError(index)
+        i = np.searchsorted(self._offsets, index, side='right') - 1
+        return self.data[self.entries[i]][index - self._offsets[i]]
 
+    def iter_frames(self):
+        for entry in self.entries:
+            for i in range(self.nb_frames[entry]):
+                yield entry, i, self.data[entry][i]
 
-    def get_eiger_source(self):
-        """Résout le softlink/Virtual Dataset des images eiger d'une entrée.
-
-        Retourne un dict avec:
-        - 'vds_path': chemin interne dans le fichier de métadonnées (measurement/eiger)
-        - 'real_file': chemin (relatif au dossier du .h5) du fichier physique contenant les images
-        - 'real_dataset': chemin du dataset dans le fichier physique
-        - 'shape', 'dtype': du dataset vu depuis le fichier de métadonnées
-        """
-        try:
-            ds = self.h5_file[f'{self.entry}/measurement/eiger']
-        except KeyError:
-            try:
-                ds = self.h5_file[f'{self.entry}/measurement/frelon3']
-            except KeyError:
-                raise KeyError(f"Neither 'measurement/eiger' nor 'measurement/frelon3' found in entry {self.entry}.")
-        #ds = self.h5_file[f'{self.entry}/instrument/eiger/image']
+    # ------------------------------------------------------------------
+    def get_eiger_source(self, entry):
+        """Résout le softlink/Virtual Dataset des images eiger d'une entrée."""
+        ds = self.data[entry]
         info = {
-            'vds_path': f'{self.entry}/measurement/eiger',
+            'vds_path': ds.name,
             'shape': ds.shape,
             'dtype': ds.dtype,
             'real_file': None,
@@ -104,16 +128,15 @@ class ID11Data:
             info['real_dataset'] = ds.name
         return info
 
-
-    def get_motor_positions(self, motor_names=MOTOR_NAMES):
+    def get_motor_positions(self, entry, motor_names=MOTOR_NAMES):
         """Renvoie la position de chaque moteur, catégorisée par source.
 
         - 'measurement' : moteurs qui bougent pendant le scan -> tableau (1 valeur/point)
         - 'positioners' : moteurs fixes pendant le scan -> valeur scalaire
         """
         positions = {'measurement': {}, 'positioners': {}}
-        meas = self.h5_file.get(f'{self.entry}/measurement')
-        pos = self.h5_file.get(f'{self.entry}/instrument/positioners')
+        meas = self.h5_file.get(f'{entry}/measurement')
+        pos = self.h5_file.get(f'{entry}/instrument/positioners')
         for name in motor_names:
             if meas is not None and name in meas:
                 positions['measurement'][name] = meas[name][()]
@@ -121,11 +144,9 @@ class ID11Data:
                 positions['positioners'][name] = pos[name][()]
         return positions
 
-
-
-    def get_time_metadata(self):
+    def get_time_metadata(self, entry):
         """Récupère les métadonnées temporelles (scan + par frame) d'une entrée."""
-        g = self.h5_file[self.entry]
+        g = self.h5_file[entry]
         inst = g['instrument']
 
         def _decode(ds):
@@ -152,16 +173,10 @@ class ID11Data:
 
         return meta
 
-
-    def get_detector_info(self):
-        """Récupère les métadonnées géométriques/techniques du détecteur eiger.
-
-        Lit les champs NXdetector standards (taille de pixel, distance,
-        centre du faisceau, ...) directement sous 'instrument/eiger'.
-        Les champs absents du fichier restent à None (dépend de la version
-        de bliss/du firmware Eiger utilisés lors de l'acquisition).
-        """
-        det = self.h5_file.get(f'{self.entry}/instrument/eiger')
+    def get_detector_info(self, entry):
+        """Récupère les métadonnées géométriques/techniques du détecteur eiger
+        pour une entrée donnée. Les champs absents restent à None."""
+        det = self.h5_file.get(f'{entry}/instrument/eiger')
         info = {key: None for key in DETECTOR_INFO_KEYS}
         if det is None:
             return info
@@ -176,26 +191,35 @@ class ID11Data:
         for key in DETECTOR_INFO_KEYS:
             if key in det:
                 info[key] = _decode(det[key][()])
-        image_width = self.data.shape[2] if self.data.ndim == 3 else self.data.shape[1]
-        image_height = self.data.shape[1] if self.data.ndim == 3 else self.data.shape[0]
-        info['image_width'] = image_width
-        info['image_height'] = image_height
+        data = self.data[entry]
+        info['image_width'] = data.shape[2] if data.ndim == 3 else data.shape[1]
+        info['image_height'] = data.shape[1] if data.ndim == 3 else data.shape[0]
         return info
 
-
-    def list_detector_keys(self):
-        """Liste tous les champs disponibles sous 'instrument/eiger'.
-
-        Utile pour explorer les métadonnées réellement présentes dans un
-        fichier donné (le contenu exact varie selon la version de bliss).
-        """
-        det = self.h5_file.get(f'{self.entry}/instrument/eiger')
+    def list_detector_keys(self, entry=None):
+        """Liste tous les champs disponibles sous 'instrument/eiger' (1re entry par défaut)."""
+        entry = entry or self.entries[0]
+        det = self.h5_file.get(f'{entry}/instrument/eiger')
         if det is None:
             return []
         keys = []
         det.visit(keys.append)
         return keys
 
+    # ------------------------------------------------------------------
+    def _check_scan_consistency(self):
+        for entry in self.entries:
+            nb = self.nb_frames[entry]
+            motors = self.scanned_motors[entry]
+            print(f"[{entry}] {nb} frames")
+            for motor, value in motors.items():
+                if value.shape[0] == nb:
+                    print(f"  {motor}: {value.shape[0]} points = nb de frames")
+            if len(motors) > 1:
+                print(f"  Moteurs scannés : {', '.join(motors)}")
+                product = int(np.prod([v.shape[0] for v in motors.values()]))
+                if product == nb:
+                    print(f"  Le produit des points ({product}) correspond au nb de frames.")
 
     def close(self):
         """Ferme le fichier HDF5."""
