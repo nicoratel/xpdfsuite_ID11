@@ -3,10 +3,11 @@ from xpdfsuite_ID11 import extract_xpdf,XRDProcessor,ID11Data
 import os
 from xpdfsuite_ID11.peakfit import fit_peak_pseudovoigt
 
-def extract_number_of_images(file,entry):
+def extract_number_of_images(file,entry,poni_file):
     
-    eiger = ID11Data(file)
-    return eiger.nb_frames[entry]
+    eiger = XRDProcessor(file, entry=entry, poni_file=poni_file)
+    
+    return eiger.nb_frames
 
 
 def process_lost_flow(file,
@@ -82,8 +83,10 @@ def process_lost_flow(file,
     if entry_sample is None:
         eiger = ID11Data(file)
         entry_sample = eiger.entries[0]
+    else:
+        eiger = ID11Data(file, entry=entry_sample)
     
-    nb_images = extract_number_of_images(file, entry_sample)
+    nb_images = extract_number_of_images(file, entry_sample,poni_file)
     nb_images_ref = nb_images # here we assume the reference file has the same number of images as the sample file. If not, you can modify this to extract the number of images from the reference file as well.
     pdf_files = []
     if nb_images != nb_images_ref:
@@ -172,44 +175,49 @@ def process_lost_flow(file,
         res[str(frame_group)]['G'] = G
         pdf_files.append(outputfile)
         if plot:
-            plt.plot(r, G, label=f'Frame {frame_str}')
+            plt.plot(r, G/G.max(), label=f'Frame {frame_str}')
     if plot:
         plt.xlabel('r (Å)')
         plt.ylabel('G(r)')
         plt.legend()
     return pdf_files, res
 
-def convert_position_to_time(res, scanned_motors, débit=8):  # débit en µL/min
+def convert_position_to_time(position, position0=[0,0], x_coude=31, z_retour=1, debit=8.0,
+                   section=2.0, long_tri=0.0, section_tri=0.5*5**(1/2), tol=1e-1):
     """
-    Convert the scanned motor positions to reaction time based on the experimental setup.
+    Convertit la position dans la puce en temps de réaction.
+    Temps de réaction (s) au point `position`, depuis la fin du mélangeur.
 
-    Parameters
-    ----------
-    res : dict
-        Dictionary containing the extracted r and G values for each frame, along with the scanned motor positions.
-    scanned_motors : dict
-        Dictionary containing the scanned motor names and their corresponding values for each frame group.
-        
+    t= volume/debit, avec volume cumulé depuis la fin du mélangeur jusqu'à la position `position`.
+    l'utilisation du volume plutot que de la surface permet de prendre en compte les variations de section du canal.
 
-    Returns
-    -------
-    reaction_time : dict
-        Dictionary containing the reaction time for each frame group.
-        reaction_time[frame_group] = time_value
+    position, position0 : (x, z) en mm (position0 = fin du mélangeur)
+    x_coude  : x du palier vertical (mm)
+    z_retour : offset en z entre les 2 paliers (mm)
+    debit    : débit total en µL/s (défaut 8)
+    section  : section du canal en mm² (défaut 2 x 2 mm)
+    long_tri, section_tri : zone triangulaire au début (ignorée si long_tri=0, section triangle équilatéral de 2mm de côté par défaut)
+    tol      : tolérance (mm) pour décider sur quel palier on se trouve
     """
-    # Implement this function based on your experimental setup.
-    # For example, if you have a linear relationship between a motor position and time, you can use that here.
-    # This is a placeholder implementation and should be replaced with actual logic.
+    x, z = position
+    x0, z0 = position0
     
-    reaction_time = {}
-    i=0
-    for frame_group, data in res.items():
-        
-        #placeholder logic: simply using the index as time value. Replace this with actual conversion logic.
-        reaction_time[frame_group] = i  # Replace this with actual conversion logic based on your experimental setup.
-        i+=1
-    
-    return reaction_time
+
+    L1 = abs(x_coude - x0)      # 1er palier horizontal
+    L2 = abs(z_retour)     # palier vertical
+
+    if abs(z - (z0 + z_retour)) < tol:          # 3e palier : on revient en sens inverse
+        d = L1 + L2 + abs(x - x_coude)
+    elif abs(x - x_coude) < tol:         # 2e palier (vertical)
+        d = L1 + abs(z - z0)
+    else:                                # 1er palier
+        d = abs(x - x0)
+
+    # volume cumulé (1 µL = 1 mm³) : zone triangulaire puis zone carrée
+    d_tri = min(d, long_tri)
+    volume = d_tri * section_tri + (d - d_tri) * section
+    #print(f"Position:{position}, time={volume/debit:.2f}s, volume={volume:.2f}mm³, debit={debit:.2f}µL/s")
+    return volume / debit
 
 def monitor_pdf_peaks_lost_flow(file,
                       ref_file=None,
@@ -231,7 +239,8 @@ def monitor_pdf_peaks_lost_flow(file,
                       entry_ref=None,
                       peak_positions=[2.3,2.9],
                       fit_window=0.4,
-                      plot=True):
+                      plot=True,
+                      position0=[0,0], x_coude=31, z_retour=1, debit=8.0,section=2.0, long_tri=0.0, section_tri=0.5*5**(1/2), tol=1e-1):
 
     """
     Monitor the evolution of specific PDF peaks over a series of images from a lost-flow experiment.
@@ -305,12 +314,28 @@ def monitor_pdf_peaks_lost_flow(file,
                                        frame_binning=frame_binning,
                                        entry_sample=entry_sample,
                                        entry_ref=entry_ref,
-                                       plot=False)
+                                       plot=False,
+                                       )
 
     scanned_motors = res[list(res.keys())[0]]['position']  # Assuming all frame groups have the same scanned motors
     print(f"Scanned motors: {scanned_motors}")
     # il va falloir relier les positions (x,z) au temps de réaction, d'une façon ou d'une autre...
-    reaction_time = convert_position_to_time(res, scanned_motors)  # Implement this function based on your experimental setup
+    # convert_position_to_time() est une fonction qui fait ça, mais il faut lui passer les positions (x,z) et les paramètres du canal microfluidique.
+    reaction_time = {}
+    for frame_group, data in res.items():
+        scanned_motors = res[frame_group]['position'] 
+        for key, value in scanned_motors.items():
+            if 'y' in key.lower():
+                y_motor = value
+            else:
+                y_motor = position0[1]
+            if 'z' in key.lower():
+                z_motor = value
+            else:
+                z_motor = position0[1] 
+        position = [y_motor, z_motor]
+
+        reaction_time[frame_group] = convert_position_to_time(position, position0=position0, x_coude=x_coude, z_retour=z_retour, debit=debit, section=section, long_tri=long_tri, section_tri=section_tri, tol=tol)  # Implement this function based on your experimental setup
 
     peak_evolution = {}
     for frame_group, data in res.items():
@@ -450,7 +475,7 @@ def process_stop_flow(file,
         eiger = ID11Data(file)
         entry_sample = eiger.entries[0]
     
-    nb_images = extract_number_of_images(file, entry_sample)
+    nb_images = extract_number_of_images(file, entry_sample,poni_file)
     nb_images_ref = nb_images # here we assume the reference file has the same number of images as the sample file. If not, you can modify this to extract the number of images from the reference file as well.
     pdf_files = []
     if nb_images != nb_images_ref:

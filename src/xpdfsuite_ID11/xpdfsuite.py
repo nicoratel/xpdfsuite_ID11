@@ -128,6 +128,7 @@ class XRDProcessor(ID11Data):
                 raise ValueError(f"Entrée '{self.entry_str}' inconnue. Entrées disponibles : {self.entries}")
             chosen_entry = self.entry_str
             self.data = self.entries_data[chosen_entry]
+            self.entry = chosen_entry
         else:
             chosen_entry = entry if entry is not None else self.entries[0] # fallback sur la première entry si None
             if chosen_entry not in self.entries:
@@ -220,6 +221,9 @@ class XRDProcessor(ID11Data):
             self.times = self.times[self.entry]
             self.epoch = self.epoch[self.entry]
             self.nb_frames = self.nb_frames[self.entry]
+            self.samplename = self.samplename[self.entry]
+            self.command = self.command[self.entry]
+        self.filename = image_file
 
     def integrate(self, npt=2500, plot=False):
         """
@@ -453,8 +457,8 @@ def extract_xpdf(sample_processor,
 
 
     # Generate output filename if not provided
-    if outputfile is None:
-        outputfile = sample_processor.filename.split('.')[0] + '_pdf.gr'
+    #if outputfile is None:
+    #    outputfile = sample_processor.filename.split('.')[0] + f'_{sample_processor.samplename}_{sample_processor.frame}.gr'
     
     if interactive:
         # Création de l'objet PDFInteractive avec la nouvelle interface
@@ -523,12 +527,13 @@ def extract_xpdf(sample_processor,
         header += '#L r(Å)  G(Å$^{-2}$)\n'
         
         # Write output file
-        with open(outputfile, 'w') as f:
-            f.write(header)
-            for ri, Gi in zip(r, G):
-                f.write(f'{ri:.4f}  {Gi:.6f}\n')
+        if outputfile is not None:
+            with open(outputfile, 'w') as f:
+                f.write(header)
+                for ri, Gi in zip(r, G):
+                    f.write(f'{ri:.4f}  {Gi:.6f}\n')
         
-        print(f'PDF saved to {outputfile}')
+            print(f'PDF saved to {outputfile}')
         sample_processor.close()
         if ref_processor is not None:
             ref_processor.close()
