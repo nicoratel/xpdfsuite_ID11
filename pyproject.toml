@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "xpdfsuite_ID11"
-version = "0.1.0"
+version = "0.1.1"
 description = "Python toolkit for X-ray pair distribution function (xPDF) analysis from ID11 data"
 authors = [{name = "Nicolas Ratel-Ramond"}]
 readme = "README.md"
@@ -40,6 +40,7 @@ dependencies = [
     "h5py>=3.0.0",
     "tqdm>=4.60.0",
     "streamlit>=1.30.0",
+    "PyYAML>=6.0",
 ]
 
 [project.optional-dependencies]
