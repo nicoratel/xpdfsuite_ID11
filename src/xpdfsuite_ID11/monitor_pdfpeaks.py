@@ -49,6 +49,22 @@ def _list_subdirs(path):
     except (PermissionError, FileNotFoundError, NotADirectoryError):
         return []
 
+def _browse_go_parent():
+    current = Path(st.session_state["browse_path"])
+    st.session_state["browse_path"] = str(current.parent)
+
+def _browse_enter_subdir():
+    selected = st.session_state.get("browse_subdirs")
+    if selected:
+        current = Path(st.session_state["browse_path"])
+        st.session_state["browse_path"] = str(current / selected)
+
+def _browse_choose():
+    # Exécuté par le callback on_click, donc AVANT que le widget
+    # text_input(key="data_root") ne soit réinstancié : la modification
+    # de st.session_state["data_root"] est alors autorisée.
+    st.session_state["data_root"] = st.session_state["browse_path"]
+
 def folder_browser():
     """Navigateur de dossiers natif Streamlit (ne dépend d'aucun binaire
     externe type zenity/tkinter, utilisable sur un serveur distant sans
@@ -60,22 +76,16 @@ def folder_browser():
     st.caption(f"📁 `{current}`")
 
     col_up, col_choose = st.columns(2)
-    if col_up.button("⬆️ Parent", key="browse_up", width='stretch'):
-        st.session_state["browse_path"] = str(current.parent)
-        st.rerun()
-    if col_choose.button("✅ Choisir", key="browse_choose", width='stretch'):
-        st.session_state["data_root"] = str(current)
-        st.rerun()
+    col_up.button("⬆️ Parent", key="browse_up", width='stretch', on_click=_browse_go_parent)
+    col_choose.button("✅ Choisir", key="browse_choose", width='stretch', on_click=_browse_choose)
 
     subdirs = _list_subdirs(current)
     if subdirs:
-        selected = st.radio(
+        st.radio(
             "Sous-dossiers", subdirs, key="browse_subdirs",
             label_visibility="collapsed",
         )
-        if st.button("➡️ Entrer dans le dossier", key="browse_enter"):
-            st.session_state["browse_path"] = str(current / selected)
-            st.rerun()
+        st.button("➡️ Entrer dans le dossier", key="browse_enter", on_click=_browse_enter_subdir)
     else:
         st.caption("Aucun sous-dossier")
 
