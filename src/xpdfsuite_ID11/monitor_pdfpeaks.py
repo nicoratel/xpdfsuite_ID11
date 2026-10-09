@@ -8,12 +8,9 @@ import plotly.express as px
 from xpdfsuite_ID11 import extract_xpdf,XRDProcessor,ID11Data
 import numpy as np
 import tempfile
-import tkinter as tk
-from tkinter import filedialog
-import subprocess, sys
 import json
 
-import os, sys, json, glob, subprocess
+import os, sys, json, glob
 from pathlib import Path
 import streamlit as st
 
@@ -30,18 +27,6 @@ def save_config(**kw):
     cfg.update(kw)
     CONFIG.write_text(json.dumps(cfg))
 
-def pick_folder():
-    if sys.platform == "darwin":
-        cmd = ["osascript", "-e", 'POSIX path of (choose folder)']
-    elif sys.platform.startswith("linux"):
-        cmd = ["zenity", "--file-selection", "--directory"]
-    else:  # Windows
-        code = ("import tkinter as tk; from tkinter import filedialog;"
-                "r=tk.Tk(); r.withdraw(); r.attributes('-topmost',True);"
-                "print(filedialog.askdirectory())")
-        cmd = [sys.executable, "-c", code]
-    return subprocess.run(cmd, capture_output=True, text=True).stdout.strip()
-
 @st.cache_data(ttl=60)
 def list_files(root, pattern="*.h5"):
     return sorted(glob.glob(os.path.join(root, "**", pattern), recursive=True))
@@ -54,10 +39,45 @@ if "data_root" not in st.session_state:
         or str(Path.home())
     )
 
-def browse_root():
-    p = pick_folder()
-    if p:
-        st.session_state["data_root"] = p
+def _list_subdirs(path):
+    """Liste les sous-dossiers accessibles (ignore les erreurs de permission)."""
+    try:
+        return sorted(
+            d.name for d in Path(path).iterdir()
+            if d.is_dir() and not d.name.startswith(".")
+        )
+    except (PermissionError, FileNotFoundError, NotADirectoryError):
+        return []
+
+def folder_browser():
+    """Navigateur de dossiers natif Streamlit (ne dépend d'aucun binaire
+    externe type zenity/tkinter, utilisable sur un serveur distant sans
+    affichage graphique)."""
+    if "browse_path" not in st.session_state:
+        st.session_state["browse_path"] = st.session_state.get("data_root") or str(Path.home())
+
+    current = Path(st.session_state["browse_path"])
+    st.caption(f"📁 `{current}`")
+
+    col_up, col_choose = st.columns(2)
+    if col_up.button("⬆️ Parent", key="browse_up", width='stretch'):
+        st.session_state["browse_path"] = str(current.parent)
+        st.rerun()
+    if col_choose.button("✅ Choisir", key="browse_choose", width='stretch'):
+        st.session_state["data_root"] = str(current)
+        st.rerun()
+
+    subdirs = _list_subdirs(current)
+    if subdirs:
+        selected = st.radio(
+            "Sous-dossiers", subdirs, key="browse_subdirs",
+            label_visibility="collapsed",
+        )
+        if st.button("➡️ Entrer dans le dossier", key="browse_enter"):
+            st.session_state["browse_path"] = str(current / selected)
+            st.rerun()
+    else:
+        st.caption("Aucun sous-dossier")
 
 
 
@@ -143,7 +163,8 @@ with tab1:
 
     c1, c2 = st.columns([6, 1],vertical_alignment="bottom")
     c1.text_input("Dossier de travail", key="data_root")
-    c2.button("Parcourir…", on_click=browse_root, width='stretch')
+    with c2.popover("Parcourir…", width='stretch'):
+        folder_browser()
 
     col_files, col_params = st.columns(2)
 
