@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "xpdfsuite_ID11"
-version = "0.1.2"
+version = "0.1.3"
 description = "Python toolkit for X-ray pair distribution function (xPDF) analysis from ID11 data"
 authors = [{name = "Nicolas Ratel-Ramond"}]
 readme = "README.md"
@@ -54,7 +54,8 @@ Repository = "https://github.com/nicoratel/xpdfsuite"
 Issues = "https://github.com/nicoratel/xpdfsuite/issues"
 
 [project.scripts]
-xpdfsuite-app = "xpdfsuite._launcher:main"
+
+xpdfsuite-monitor = "xpdfsuite_ID11._launcher:main_monitor"
 
 [tool.setuptools.packages.find]
 where = ["src"]
