@@ -1,13 +1,171 @@
 from matplotlib import pyplot as plt
 from xpdfsuite_ID11 import extract_xpdf,XRDProcessor,ID11Data
 import os
+import numpy as np
+from scipy.spatial import cKDTree
 from xpdfsuite_ID11.peakfit import fit_peak_pseudovoigt
+
 
 def extract_number_of_images(file,entry,poni_file):
     
     eiger = XRDProcessor(file, entry=entry, poni_file=poni_file)
     
     return eiger.nb_frames
+
+
+def _resolve_entry_name(data, entry):
+    """
+    Convertit un identifiant d'entry (None, int ou str) vers la clé d'entry réelle
+    utilisée par `ID11Data.entries`, selon la même convention que `XRDProcessor`
+    (un entier `i` correspond à l'entry `'{i+1}.1'`).
+
+    Renvoie None si `entry` est None (pas de restriction d'entry).
+    """
+    if entry is None:
+        return None
+    if isinstance(entry, (int, np.integer)):
+        entry_name = f'{int(entry) + 1}.1'
+    else:
+        entry_name = entry
+    if entry_name not in data.entries:
+        raise ValueError(f"Entrée '{entry_name}' inconnue. Entrées disponibles : {data.entries}")
+    return entry_name
+
+
+def _get_motor_position_table(data, motor_names):
+    """
+    Construit, pour chaque frame de chaque entry d'un objet ID11Data, le vecteur de
+    position des moteurs demandés (moteur scanné -> une valeur par frame, moteur fixe
+    -> valeur de positionneur répétée sur toutes les frames de l'entry).
+
+    Parameters
+    ----------
+    data : ID11Data
+        Objet déjà ouvert sur le fichier HDF5 à analyser.
+    motor_names : sequence of str
+        Noms des moteurs à récupérer (ex: 'difftz', 'samty', 'samtz').
+
+    Returns
+    -------
+    positions : ndarray, shape (N, len(motor_names))
+        Position des moteurs pour chaque frame (toutes entries concaténées).
+    frame_info : list of tuple (entry, frame_index_in_entry, global_index)
+        Permet de retrouver, pour chaque ligne de `positions`, l'entry et l'indice
+        de frame d'origine.
+    """
+    rows = []
+    frame_info = []
+    global_idx = 0
+    for entry in data.entries:
+        nb = data.nb_frames[entry]
+        meas = data.positions[entry]['measurement']
+        pos = data.positions[entry]['positioners']
+        cols = []
+        for name in motor_names:
+            if name in meas:
+                values = np.asarray(meas[name], dtype=float)
+                if values.shape[0] != nb:
+                    raise ValueError(
+                        f"Le moteur '{name}' de l'entry {entry} a {values.shape[0]} points, "
+                        f"alors que {nb} frames sont attendues.")
+            elif name in pos:
+                values = np.full(nb, float(pos[name]))
+            else:
+                raise KeyError(f"Moteur '{name}' introuvable (measurement/positioners) dans l'entry {entry}.")
+            cols.append(values)
+        rows.append(np.column_stack(cols))
+        for i in range(nb):
+            frame_info.append((entry, i, global_idx))
+            global_idx += 1
+    positions = np.vstack(rows)
+    return positions, frame_info
+
+
+def match_frames_by_motor_positions(file, ref_file, motor_names=('difftz', 'samty', 'samtz'), tol=0.05,
+                                     entry_sample=None, entry_ref=None):
+    """
+    Apparie les frames du fichier échantillon `file` avec celles du fichier de référence
+    `ref_file` en comparant les positions des moteurs `motor_names` lues dans les
+    métadonnées HDF5 (measurement si le moteur est scanné, positioners s'il est fixe).
+
+    Deux frames sont considérées comme correspondantes si l'écart sur CHAQUE moteur est
+    inférieur ou égal à `tol`.
+
+    Parameters
+    ----------
+    file : str
+        Chemin du fichier HDF5 échantillon.
+    ref_file : str
+        Chemin du fichier HDF5 de référence.
+    motor_names : sequence of str
+        Noms des moteurs à comparer (défaut : difftz, samty, samtz).
+    tol : float
+        Tolérance (mm) sur chaque moteur pour considérer deux positions comme identiques
+        (défaut 0.05 mm = 50 µm).
+    entry_sample : str, optional
+        Limiter la recherche à une seule entry du fichier échantillon. Par défaut, toutes
+        les entries du fichier sont utilisées. Accepte aussi un entier (index 0-based,
+        converti en entry '{i+1}.1', comme pour `XRDProcessor`).
+    entry_ref : str, optional
+        Limiter la recherche à une seule entry du fichier de référence (idem `entry_sample`).
+
+    Returns
+    -------
+    matches : list of dict
+        Une entrée par frame de `file` ayant trouvé une correspondance dans `ref_file`,
+        avec les clés : 'sample_entry', 'sample_frame', 'sample_global_index',
+        'ref_entry', 'ref_frame', 'ref_global_index', 'distance' (écart euclidien, mm).
+    unmatched : list of dict
+        Frames de `file` n'ayant trouvé aucune correspondance dans `ref_file` à la
+        tolérance donnée (clés : 'sample_entry', 'sample_frame', 'sample_global_index').
+    """
+    sample_data = ID11Data(file)
+    ref_data = ID11Data(ref_file)
+    try:
+        entry_sample_name = _resolve_entry_name(sample_data, entry_sample)
+        entry_ref_name = _resolve_entry_name(ref_data, entry_ref)
+        if entry_sample_name is not None:
+            sample_data.entries = [entry_sample_name]
+        if entry_ref_name is not None:
+            ref_data.entries = [entry_ref_name]
+        sample_positions, sample_info = _get_motor_position_table(sample_data, motor_names)
+        ref_positions, ref_info = _get_motor_position_table(ref_data, motor_names)
+    finally:
+        sample_data.close()
+        ref_data.close()
+
+    tree = cKDTree(ref_positions)
+    # borne large (sphère englobant le pavé de tolérance par axe), puis vérification stricte par axe
+    max_dist = tol * np.sqrt(len(motor_names))
+    distances, indices = tree.query(sample_positions, distance_upper_bound=max_dist)
+
+    matches = []
+    unmatched = []
+    for (sample_entry, sample_frame, sample_global), dist, ref_idx in zip(sample_info, distances, indices):
+        if np.isfinite(dist) and ref_idx < len(ref_info):
+            ref_entry, ref_frame, ref_global = ref_info[ref_idx]
+            delta = np.abs(sample_positions[sample_global] - ref_positions[ref_global])
+            if np.all(delta <= tol):
+                matches.append({
+                    'sample_entry': sample_entry,
+                    'sample_frame': sample_frame,
+                    'sample_global_index': sample_global,
+                    'ref_entry': ref_entry,
+                    'ref_frame': ref_frame,
+                    'ref_global_index': ref_global,
+                    'distance': float(dist),
+                })
+                continue
+        unmatched.append({
+            'sample_entry': sample_entry,
+            'sample_frame': sample_frame,
+            'sample_global_index': sample_global,
+        })
+
+    return matches, unmatched
+
+
+
 
 
 def process_lost_flow(file,
@@ -28,7 +186,9 @@ def process_lost_flow(file,
                       nb_repeats=None,
                       frame_binning=1,
                       entry_sample=None,
-                      entry_ref=None):
+                      entry_ref=None,
+                      motor_names=('difftz', 'samty', 'samtz'),
+                      position_tol=0.05):
     """
     Process a series of images from a lost-flow experiment, extracting the PDF for each frame.
     
@@ -69,6 +229,12 @@ def process_lost_flow(file,
         e.g., if frame_binning=2 and frame_step=4, the first series will be frames 0-1, the second series will be frames 4-5, etc.
     nb_repeats : int
         Number of repeats to average together. (None means all repeats that fit in the number of images will be used.)
+    motor_names : sequence of str
+        Noms des moteurs utilisés pour apparier les frames de `file` avec celles de `ref_file`
+        (défaut : difftz, samty, samtz). Ignoré si `ref_file` est None.
+    position_tol : float
+        Tolérance (mm) sur chaque moteur pour considérer deux positions comme identiques
+        lors de l'appariement sample/ref (défaut 0.05 mm = 50 µm).
 
     Returns
     -------
@@ -83,14 +249,25 @@ def process_lost_flow(file,
     if entry_sample is None:
         eiger = ID11Data(file)
         entry_sample = eiger.entries[0]
-    else:
-        eiger = ID11Data(file, entry=entry_sample)
-    
+
     nb_images = extract_number_of_images(file, entry_sample,poni_file)
     nb_images_ref = nb_images # here we assume the reference file has the same number of images as the sample file. If not, you can modify this to extract the number of images from the reference file as well.
     pdf_files = []
     if nb_images != nb_images_ref:
         raise ValueError("The number of images in the sample and reference files do not match.")
+
+    # Appariement des frames de `file` avec celles de `ref_file` par position moteur
+    # (difftz/samty/samtz), à la place de l'hypothèse "même indice de frame".
+    ref_frame_map = {}
+    if ref_file is not None:
+        matches, unmatched = match_frames_by_motor_positions(
+            file, ref_file, motor_names=motor_names, tol=position_tol,
+            entry_sample=entry_sample, entry_ref=entry_ref)
+        ref_frame_map = {m['sample_frame']: m['ref_frame'] for m in matches}
+        if unmatched:
+            missing = [u['sample_frame'] for u in unmatched]
+            print(f"Warning: no reference frame found within position_tol={position_tol} mm for sample frames "
+                  f"{missing}; falling back to the same frame index in ref_file for those.")
 
     # Paramètres (à ajouter à la signature de la fonction)
     # frame_binning : nb de frames consécutives moyennées dans une série
@@ -141,7 +318,9 @@ def process_lost_flow(file,
         sample_processor = XRDProcessor(file, frame=frame_arg, poni_file=poni_file,
                                         mask=mask_file, polarization_factor=polarization, entry=entry_sample)
         if ref_file is not None:
-            ref_processor = XRDProcessor(ref_file, frame=frame_arg, poni_file=poni_file, mask=mask_file, polarization_factor=polarization, entry=entry_ref)
+            frame_group_ref = [ref_frame_map.get(f, f) for f in frame_group]
+            frame_arg_ref = frame_group_ref[0] if len(frame_group_ref) == 1 else frame_group_ref
+            ref_processor = XRDProcessor(ref_file, frame=frame_arg_ref, poni_file=poni_file, mask=mask_file, polarization_factor=polarization, entry=entry_ref)
         else:
             ref_processor = None
 
@@ -421,7 +600,9 @@ def process_stop_flow(file,
                       qmaxinst=None,
                       rpoly=0.9,
                       entry_sample=None,
-                      entry_ref=None
+                      entry_ref=None,
+                      motor_names=('difftz', 'samty', 'samtz'),
+                      position_tol=0.05
                       ):
     """
     Process a single image from a stop-flow experiment, extracting the PDF.
@@ -460,6 +641,12 @@ def process_stop_flow(file,
         The entry in the sample HDF5 file to process. If None, the first entry will be used.
     entry_ref : str
         The entry in the reference HDF5 file to process. If None, the first entry will be used.
+    motor_names : sequence of str
+        Noms des moteurs utilisés pour apparier les frames de `file` avec celles de `ref_file`
+        (défaut : difftz, samty, samtz). Ignoré si `ref_file` est None.
+    position_tol : float
+        Tolérance (mm) sur chaque moteur pour considérer deux positions comme identiques
+        lors de l'appariement sample/ref (défaut 0.05 mm = 50 µm).
     
     Returns
     -------
@@ -475,11 +662,25 @@ def process_stop_flow(file,
         eiger = ID11Data(file)
         entry_sample = eiger.entries[0]
     
+ 
     nb_images = extract_number_of_images(file, entry_sample,poni_file)
     nb_images_ref = nb_images # here we assume the reference file has the same number of images as the sample file. If not, you can modify this to extract the number of images from the reference file as well.
     pdf_files = []
     if nb_images != nb_images_ref:
         raise ValueError("The number of images in the sample and reference files do not match.")
+
+    # Appariement des frames de `file` avec celles de `ref_file` par position moteur
+    # (difftz/samty/samtz), à la place de l'hypothèse "même indice de frame".
+    ref_frame_map = {}
+    if ref_file is not None:
+        matches, unmatched = match_frames_by_motor_positions(
+            file, ref_file, motor_names=motor_names, tol=position_tol,
+            entry_sample=entry_sample, entry_ref=entry_ref)
+        ref_frame_map = {m['sample_frame']: m['ref_frame'] for m in matches}
+        if unmatched:
+            missing = [u['sample_frame'] for u in unmatched]
+            print(f"Warning: no reference frame found within position_tol={position_tol} mm for sample frames "
+                  f"{missing}; falling back to the same frame index in ref_file for those.")
 
     # Paramètres (à ajouter à la signature de la fonction)
     # frame_binning : nb de frames consécutives moyennées dans une série
@@ -501,7 +702,8 @@ def process_stop_flow(file,
                                         mask=mask_file, polarization_factor=polarization, entry=entry_sample)
         
         if ref_file is not None:
-            ref_processor = XRDProcessor(ref_file, frame=frame_arg, poni_file=poni_file, mask=mask_file, polarization_factor=polarization, entry=entry_ref)
+            frame_arg_ref = ref_frame_map.get(bin_idx, bin_idx)
+            ref_processor = XRDProcessor(ref_file, frame=frame_arg_ref, poni_file=poni_file, mask=mask_file, polarization_factor=polarization, entry=entry_ref)
         else:
             ref_processor = None
         frame_group = [bin_idx] 

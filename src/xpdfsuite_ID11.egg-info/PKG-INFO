@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: xpdfsuite_ID11
-Version: 0.1.0
+Version: 0.1.5
 Summary: Python toolkit for X-ray pair distribution function (xPDF) analysis from ID11 data
 Author: Nicolas Ratel-Ramond
 License: MIT
@@ -33,6 +33,7 @@ Requires-Dist: plotly>=5.0.0
 Requires-Dist: h5py>=3.0.0
 Requires-Dist: tqdm>=4.60.0
 Requires-Dist: streamlit>=1.30.0
+Requires-Dist: PyYAML>=6.0
 Provides-Extra: pdfanalysis
 Requires-Dist: pdfanalysis>=0.13.0; extra == "pdfanalysis"
 
@@ -40,9 +41,10 @@ Requires-Dist: pdfanalysis>=0.13.0; extra == "pdfanalysis"
 
 **xPDFsuite_ID11** is a Python toolkit for extracting the Pair Distribution Function  Diffraction images acquired on ID11.
 
-
+To run the app, 
+> streamlit run monitor_pdf_peaks.py
 
 ## Author
 
 Nicolas Ratel-Ramond  
-[github.com/nicoratel/ePDFsuite](https://github.com/nicoratel/xPDFsuite_ID11)
+[github.com/nicoratel/xPDFsuite_ID11](https://github.com/nicoratel/xPDFsuite_ID11)

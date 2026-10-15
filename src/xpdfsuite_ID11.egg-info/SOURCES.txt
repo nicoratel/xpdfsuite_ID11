@@ -7,6 +7,7 @@ src/xpdfsuite_ID11/app_xpdfsuite.py
 src/xpdfsuite_ID11/calibration.py
 src/xpdfsuite_ID11/compute_f0.py
 src/xpdfsuite_ID11/convert_position_to_time.py
+src/xpdfsuite_ID11/elements_info.yaml
 src/xpdfsuite_ID11/filereader.py
 src/xpdfsuite_ID11/id11data.py
 src/xpdfsuite_ID11/monitor_pdfpeaks.py

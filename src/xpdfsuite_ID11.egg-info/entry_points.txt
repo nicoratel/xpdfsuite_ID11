@@ -1,2 +1,2 @@
 [console_scripts]
-xpdfsuite-app = xpdfsuite._launcher:main
+xpdfsuite-monitor = xpdfsuite_ID11._launcher:main_monitor
