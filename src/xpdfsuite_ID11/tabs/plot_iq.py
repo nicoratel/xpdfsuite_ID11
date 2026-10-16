@@ -26,6 +26,9 @@ def render(cfg: ExperimentConfig) -> None:
     ref_file = cfg.ref_file
     poni_file = cfg.poni_file
     mask_path = cfg.mask_path
+    dark = cfg.dark
+    flat = cfg.flat
+    spline = cfg.spline
     polarization = cfg.polarization
     entry_sample = cfg.entry_sample
     entry_ref = cfg.entry_ref
@@ -144,6 +147,9 @@ def render(cfg: ExperimentConfig) -> None:
                         frame=0,
                         poni_file=poni_file,
                         mask=mask_path,
+                        dark=dark,
+                        flat=flat,
+                        spline=spline,
                         polarization_factor=polarization,
                         entry=entry_sample,
                     )
@@ -192,6 +198,9 @@ def render(cfg: ExperimentConfig) -> None:
                             frame=frame_arg,
                             poni_file=poni_file,
                             mask=mask_path,
+                            dark=dark,
+                            flat=flat,
+                            spline=spline,
                             polarization_factor=polarization,
                             entry=entry_sample,
                         )
@@ -265,6 +274,9 @@ def render(cfg: ExperimentConfig) -> None:
                                 frame=frame_arg_ref,
                                 poni_file=poni_file,
                                 mask=mask_path,
+                                dark=dark,
+                                flat=flat,
+                                spline=spline,
                                 polarization_factor=polarization,
                                 entry=entry_ref,
                             )
@@ -363,6 +375,9 @@ def render(cfg: ExperimentConfig) -> None:
                         frame=0,
                         poni_file=poni_file,
                         mask=mask_path,
+                        dark=dark,
+                        flat=flat,
+                        spline=spline,
                         polarization_factor=polarization,
                         entry=entry_sample,
                     )
@@ -413,6 +428,9 @@ def render(cfg: ExperimentConfig) -> None:
                             frame=frame_arg,
                             poni_file=poni_file,
                             mask=mask_path,
+                            dark=dark,
+                            flat=flat,
+                            spline=spline,
                             polarization_factor=polarization,
                             entry=entry_sample,
                         )
@@ -463,6 +481,9 @@ def render(cfg: ExperimentConfig) -> None:
                                 frame=frame_arg_ref,
                                 poni_file=poni_file,
                                 mask=mask_path,
+                                dark=dark,
+                                flat=flat,
+                                spline=spline,
                                 polarization_factor=polarization,
                                 entry=entry_ref,
                             )

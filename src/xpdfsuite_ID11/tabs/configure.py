@@ -19,6 +19,9 @@ class ExperimentConfig:
     ref_file: str | None
     poni_file: str | None
     mask_path: str | None
+    dark: str | None
+    flat: str | None
+    spline: str | None
     polarization: float
     entry_sample: int | None
     entry_ref: int | None
@@ -78,6 +81,42 @@ def render() -> ExperimentConfig:
                 tmp_file.write(mask_file.getvalue()) # On y écrit les octets du fichier téléchargé
                 mask_path = tmp_file.name # On récupère le chemin absolu (ex: /tmp/tmp_xyz.edf)
 
+        
+        dark_file = st.file_uploader(
+                    "Fichier dark (optionnel)",
+                    type=['edf'],
+                    key="dark file",
+                )
+        dark = None
+        if dark_file is not None:
+            # On crée un fichier temporaire sur le disque dur
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".edf") as tmp_file:
+                tmp_file.write(dark_file.getvalue()) # On y écrit les octets du fichier téléchargé
+                dark = tmp_file.name # On récupère le chemin absolu (ex: /tmp/tmp_xyz.edf)
+
+        flat_file = st.file_uploader(
+                    "Fichier flat (optionnel)",
+                    type=['edf'],
+                    key="flat file",
+                )
+        flat = None
+        if flat_file is not None:
+            # On crée un fichier temporaire sur le disque dur
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".edf") as tmp_file:
+                tmp_file.write(flat_file.getvalue()) # On y écrit les octets du fichier téléchargé
+                flat = tmp_file.name # On récupère le chemin absolu (ex: /tmp/tmp_xyz.edf)
+
+        spline_file = st.file_uploader(
+                    "Fichier spline (optionnel)",
+                    type=['spline'],
+                    key="spline file",
+                )
+        spline = None
+        if spline_file is not None:
+            # On crée un fichier temporaire sur le disque dur
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".spline") as tmp_file:
+                tmp_file.write(spline_file.getvalue()) # On y écrit les octets du fichier téléchargé
+                spline = tmp_file.name # On récupère le chemin absolu (ex: /tmp/tmp_xyz.spline)
     with col_params:
         st.markdown("### ⚙️ Paramètres de traitement")
     # champs pour la longueur d'onde
@@ -233,6 +272,9 @@ def render() -> ExperimentConfig:
         ref_file=ref_file,
         poni_file=poni_file,
         mask_path=mask_path,
+        dark=dark,
+        flat=flat,
+        spline=spline,
         polarization=polarization,
         entry_sample=entry_sample,
         entry_ref=entry_ref,
