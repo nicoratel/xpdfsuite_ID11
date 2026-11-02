@@ -10,6 +10,7 @@ import plotly.graph_objects as go
 
 from xpdfsuite_ID11 import extract_xpdf, ID11Data, XRDProcessor
 from xpdfsuite_ID11.app_utilities import open_fig_in_browser
+from xpdfsuite_ID11.pdf_extraction import auto_bgscale
 from xpdfsuite_ID11.utilities_process import (
     compute_reaction_time_stop_flow,
     convert_position_to_time,
@@ -57,9 +58,13 @@ def render(cfg: ExperimentConfig) -> None:
     
     # ========== INPUT PARAMETERS SECTION ==========
     st.markdown("## 📋 Input Parameters")
-    
-    composition = st.text_input("Chemical composition", value=_default_composition, placeholder="e.g., Au, NaCl, Au3Cu")
-    
+
+    if "composition" not in st.session_state:
+        st.session_state["composition"] = _default_composition
+    composition = st.text_input(
+        "Chemical composition", placeholder="e.g., Au, NaCl, Au3Cu", key="composition",
+    )
+
     st.markdown("## ⚙️ Extraction Parameters")
     
     col_out1, col_out2, col_out3, col_out4 = st.columns(4)
@@ -85,7 +90,59 @@ def render(cfg: ExperimentConfig) -> None:
 
     with col_out4:
         st.markdown("**Background Scaling**")
-        bgscale = st.number_input("bgscale", value=_default_bgscale, step=0.01, help="Scaling factor for the background subtraction. It should be kept < 1.5.")
+        auto_bgscale_enabled = st.checkbox(
+            "🔍 Détection automatique (1er pic PDF)",
+            value=st.session_state.get("auto_bgscale_enabled", False),
+            key="auto_bgscale_enabled",
+            help="Recherche le bgscale qui maximise la hauteur du premier pic de G(r).",
+        )
+
+        if auto_bgscale_enabled:
+            r_peak_auto = st.number_input(
+                "r du 1er pic (Å)",
+                value=st.session_state.get("r_peak_auto", 2.8),
+                step=0.1,
+                key="r_peak_auto",
+            )
+            if st.button("🔄 Calculer bgscale optimal", key="btn_auto_bgscale_extract"):
+                if sample_file is None or ref_file is None:
+                    st.error("Fichiers échantillon et référence requis pour la détection automatique.")
+                else:
+                    with st.spinner("Calcul du bgscale optimal..."):
+                        sample_processor0 = XRDProcessor(
+                            sample_file, frame=0, poni_file=poni_file, mask=mask_path,
+                            dark=dark, flat=flat, spline=spline,
+                            polarization_factor=polarization, entry=entry_sample,
+                        )
+                        ref_processor0 = XRDProcessor(
+                            ref_file, frame=0, poni_file=poni_file, mask=mask_path,
+                            dark=dark, flat=flat, spline=spline,
+                            polarization_factor=polarization, entry=entry_ref,
+                        )
+                        q0, I0 = sample_processor0.integrate()
+                        q0ref, Iref0 = ref_processor0.integrate()
+                        Iref0 = np.interp(q0, q0ref, Iref0)
+                        try:
+                            bg_opt, h_opt, r_found = auto_bgscale(
+                                q0, I0, Iref0, composition,
+                                qmin=qmin, qmax=qmax, qmaxinst=qmaxinst,
+                                rpoly=rpoly, Lorch=lorch, r_peak=r_peak_auto,
+                            )
+                            st.session_state["bgscale_value"] = bg_opt
+                            st.success(
+                                f"bgscale optimal = {bg_opt:.4f} "
+                                f"(pic G(r) = {h_opt:.3f} à r = {r_found:.2f} Å)"
+                            )
+                        except Exception as exc:
+                            st.error(f"Échec de la détection automatique : {exc}")
+
+        if "bgscale_value" not in st.session_state:
+            st.session_state["bgscale_value"] = _default_bgscale
+        bgscale = st.number_input(
+            "bgscale", step=0.01, key="bgscale_value",
+            help="Scaling factor for the background subtraction. It should be kept < 1.5.",
+        )
+        st.session_state["bgscale"] = bgscale
 
 
     if st.button("Calculer PDF", type="primary"):

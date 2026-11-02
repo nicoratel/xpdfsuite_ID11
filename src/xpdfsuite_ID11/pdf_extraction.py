@@ -1,9 +1,13 @@
 from matplotlib import pyplot as plt
-#from .lobato_scattering import LobatoScatteringCalculator
 from xpdfsuite_ID11.compute_f0 import f0_from_Q, f0_from_k, load_elements_yaml
 import numpy as np
 import re
 from numpy.polynomial import Polynomial
+import warnings
+from pathlib import Path
+from scipy.optimize import minimize_scalar
+
+
 
 # --------------------------------------------------
 # Chemistry utilities
@@ -73,11 +77,14 @@ def compute_avg_scattering_factor(
         Composition-averaged scattering factor f_avg(q).
     """
     elements, ratios = parse_formula(formula)
-    from pathlib import Path
     path = Path(__file__).parent / "elements_info.yaml"
     table = load_elements_yaml(path)
     favg = np.zeros(int(x_max / x_step) + 1)
-    q= np.linspace(0, x_max, int(x_max / x_step) + 1) if qvalues else np.linspace(0, x_max / (2 * np.pi), int(x_max / x_step) + 1)
+    q = (
+        np.linspace(0, x_max, int(x_max / x_step) + 1)
+        if qvalues
+        else np.linspace(0, x_max / (2 * np.pi), int(x_max / x_step) + 1)
+    )
     if qvalues:
         for element in elements:
             f = f0_from_Q(q, element, table)
@@ -128,12 +135,15 @@ def compute_f2avg(
     f2avg : ndarray
         Composition-averaged squared scattering factor <f²>(q).
     """
-    from pathlib import Path
     elements, ratios = parse_formula(formula)
     path = Path(__file__).parent / "elements_info.yaml"
     table = load_elements_yaml(path)
     f2avg = np.zeros(int(x_max / x_step) + 1)
-    q= np.linspace(0, x_max, int(x_max / x_step) + 1) if qvalues else np.linspace(0, x_max / (2 * np.pi), int(x_max / x_step) + 1)
+    q = (
+        np.linspace(0, x_max, int(x_max / x_step) + 1)
+        if qvalues
+        else np.linspace(0, x_max / (2 * np.pi), int(x_max / x_step) + 1)
+    )
     if qvalues:
         for element in elements:
             f = f0_from_Q(q, element, table)
@@ -265,6 +275,218 @@ def _lorch_with_partial_rms_renorm(qv, qmax, exponent=0.7):
 
 
 # --------------------------------------------------
+# Internal building blocks for compute_xPDF
+# --------------------------------------------------
+
+def _prepare_inputs(q, Iexp, Iref):
+    """Interpolate NaN/Inf bins of Iexp and resample Iref onto the q grid."""
+    Iexp = np.asarray(Iexp, dtype=float).copy()
+    finite_exp = np.isfinite(Iexp)
+    if not np.all(finite_exp):
+        Iexp = np.interp(q, q[finite_exp], Iexp[finite_exp])
+
+    if Iref is not None:
+        Iref = np.asarray(Iref, dtype=float)
+        finite_ref = np.isfinite(Iref)
+        if not np.all(finite_ref) and finite_ref.any():
+            q_ref_full = np.linspace(q[0], q[-1], len(Iref))
+            Iref = np.interp(q, q_ref_full[finite_ref], Iref[finite_ref])
+        elif len(Iref) != len(Iexp):
+            q_ref = np.linspace(q[0], q[-1], len(Iref))
+            Iref = np.interp(q, q_ref, Iref)
+    return Iexp, Iref
+
+
+def _prepare_normalization(q, Iexp, Iref, composition, qmax, qmaxinst, xray=True):
+    """
+    Shared setup used by :func:`compute_xPDF` and :func:`auto_bgscale`.
+
+    Clips the Q-range, interpolates ``Iexp``/``Iref`` onto a clean grid and
+    computes the composition-averaged ``<f>(q)`` and ``<f²>(q)`` once.
+    """
+    q = np.asarray(q, dtype=float)
+    if qmax is None or qmax > q.max():
+        qmax = q.max()
+    if qmaxinst is None or qmaxinst > q.max():
+        qmaxinst = qmax
+
+    Iexp, Iref = _prepare_inputs(q, Iexp, Iref)
+
+    qstep = q[1] - q[0]
+    q_f2, f2avg = compute_f2avg(
+        composition, x_max=qmax, x_step=qstep, qvalues=True, xray=xray,
+    )
+    f2avg = np.interp(q, q_f2, f2avg)
+    q_f, favg = compute_avg_scattering_factor(
+        composition, x_max=qmax, x_step=qstep, qvalues=True, xray=xray,
+    )
+    favg = np.interp(q, q_f, favg)
+    return q, Iexp, Iref, qmax, qmaxinst, f2avg, favg
+
+
+def _xpdf_core(q, I, f2avg, favg, r, qmin, qmax, qmaxinst, rpoly, Lorch):
+    """
+    Core PDFgetX3-like chain: I(Q) -> F(Q) -> background removal -> G(r).
+
+    ``I`` is the (already background-subtracted) intensity.
+    Returns ``G`` evaluated on ``r`` and the corrected ``Fc(Q)``.
+    """
+    alpha, beta = _estimate_high_q_affine_scale(
+        q=q, Iexp=I, f2avg=f2avg, favg=favg, qmax=qmax, tail_fraction=0.1,
+    )
+
+    favg2 = np.maximum(favg**2, np.finfo(float).eps)
+    Fm = q * (alpha * I + beta - f2avg) / favg2
+
+    background = fit_polynomial_background(
+        q, Fm, rpoly=rpoly, qmin=qmin, qmax=qmaxinst
+    )
+    Fc = Fm - background
+
+    mask = (q >= qmin) & (q <= qmax)
+    qv = q[mask]
+    if Lorch:
+        Fv = Fc[mask] * _lorch_with_partial_rms_renorm(qv, qmax, exponent=0.7)
+    else:
+        Fv = Fc[mask]
+
+    integrand = Fv[None, :] * np.sin(np.outer(r, qv))
+    trapz_func = getattr(np, 'trapezoid', np.trapz)
+    G = (2 / np.pi) * trapz_func(integrand, qv, axis=1)
+    return G, Fc
+
+
+def _auto_bgscale(
+    q, Iexp, Iref, f2avg, favg, qmin, qmax, qmaxinst, rpoly, Lorch,
+    r_peak=2.8, r_tol=0.2, bg_bounds=(0.0, 2.0), n_scan=41, rstep=0.01,
+):
+    """
+    Find the ``bgscale`` that maximises G(r) inside [r_peak - r_tol, r_peak + r_tol].
+
+    1. Coarse scan over ``bg_bounds`` (robust against local optima).
+    2. Bounded Brent refinement around the best grid point.
+
+    Returns
+    -------
+    bg_opt, peak_height, peak_position
+    """
+    r_win = np.arange(r_peak - r_tol, r_peak + r_tol + rstep, rstep)
+
+    def peak(bg):
+        try:
+            G, _ = _xpdf_core(
+                q, Iexp - bg * Iref, f2avg, favg, r_win,
+                qmin, qmax, qmaxinst, rpoly, Lorch,
+            )
+        except Exception:
+            return -np.inf, np.nan
+        if not np.all(np.isfinite(G)):
+            return -np.inf, np.nan
+        i = int(np.argmax(G))
+        return G[i], r_win[i]
+
+    grid = np.linspace(bg_bounds[0], bg_bounds[1], n_scan)
+    heights = np.array([peak(b)[0] for b in grid])
+    if not np.any(np.isfinite(heights)):
+        raise RuntimeError("Auto bgscale: no bgscale value gave a valid G(r).")
+    i_best = int(np.argmax(heights))
+
+    lo = grid[max(i_best - 1, 0)]
+    hi = grid[min(i_best + 1, len(grid) - 1)]
+    res = minimize_scalar(
+        lambda b: -peak(b)[0], bounds=(lo, hi),
+        method="bounded", options={"xatol": 1e-4},
+    )
+    bg_opt = float(res.x)
+    h_opt, r_found = peak(bg_opt)
+
+    if (np.isclose(bg_opt, bg_bounds[0], atol=1e-3)
+            or np.isclose(bg_opt, bg_bounds[1], atol=1e-3)):
+        warnings.warn(
+            f"Auto bgscale ({bg_opt:.3f}) is at the edge of {bg_bounds}: "
+            "result unreliable. Widen the bounds or check the data."
+        )
+    return bg_opt, h_opt, r_found
+
+
+def auto_bgscale(
+    q,
+    Iexp,
+    Iref,
+    composition,
+    qmin=0.3,
+    qmax=None,
+    qmaxinst=None,
+    rpoly=1.4,
+    Lorch=True,
+    r_peak=2.8,
+    r_tol=0.2,
+    bg_bounds=(0.0, 2.0),
+    n_scan=41,
+    rstep=0.01,
+):
+    """
+    Automatically determine the background scaling factor ``bgscale``.
+
+    Finds the value of ``bgscale`` that maximises the height of the first
+    PDF peak, searched in ``[r_peak - r_tol, r_peak + r_tol]``. This is the
+    same routine used internally by :func:`compute_xPDF` when
+    ``bgscale="auto"``, exposed here so it can be called independently
+    (e.g. from a GUI) without recomputing the full G(r) curve.
+
+    Parameters
+    ----------
+    q : ndarray
+        Momentum transfer axis in Å⁻¹.
+    Iexp : ndarray
+        Experimental (sample) intensity profile.
+    Iref : ndarray
+        Reference (background) intensity profile. Required.
+    composition : str
+        Chemical formula of the sample, e.g. ``'Au'``, ``'SiO2'``.
+    qmin, qmax, qmaxinst : float, optional
+        Q-range used for the normalisation / polynomial background fit,
+        see :func:`compute_xPDF`.
+    rpoly : float, optional
+        Polynomial background degree control. Default 1.4.
+    Lorch : bool, optional
+        Apply the Lorch modification. Default True.
+    r_peak : float, optional
+        Expected position (Å) of the first peak. Default 2.8.
+    r_tol : float, optional
+        Half-width (Å) of the peak search window. Default 0.2.
+    bg_bounds : tuple of float, optional
+        Search interval for ``bgscale``. Default (0, 2).
+    n_scan : int, optional
+        Number of points of the coarse scan. Default 41.
+    rstep : float, optional
+        Real-space step (Å) used during the peak search. Default 0.01.
+
+    Returns
+    -------
+    bgscale : float
+        Optimal background scaling factor.
+    peak_height : float
+        Height of G(r) at the found peak.
+    peak_position : float
+        Position (Å) of the found peak.
+    """
+    if Iref is None:
+        raise ValueError("auto_bgscale requires a reference profile Iref.")
+
+    q, Iexp, Iref, qmax, qmaxinst, f2avg, favg = _prepare_normalization(
+        q, Iexp, Iref, composition, qmax, qmaxinst,
+    )
+
+    return _auto_bgscale(
+        q, Iexp, Iref, f2avg, favg, qmin, qmax, qmaxinst, rpoly, Lorch,
+        r_peak=r_peak, r_tol=r_tol, bg_bounds=bg_bounds,
+        n_scan=n_scan, rstep=rstep,
+    )
+
+
+
+# --------------------------------------------------
 # PDFgetX3-like PDF (X-RAYS)
 # --------------------------------------------------
 
@@ -283,20 +505,25 @@ def compute_xPDF(
     rpoly=1.4,
     Lorch=True,
     plot=False,
+    r_peak=2.8,
+    r_tol=0.2,
+    bg_bounds=(0.0, 2.0),
+    n_scan=41,
+    return_bgscale=False,
 ):
     """
     Compute the X-ray Pair Distribution Function G(r) from an azimuthally
-    integrated diffraction intensity profile.
+    integrated diffraction intensity profile (PDFgetX3 formalism).
 
-    Follows the PDFgetX3 formalism adapted for X-ray scattering:
+    Steps:
 
     1. Optional background subtraction: ``I = Iexp - bgscale * Iref``
-     2. Robust high-Q affine scaling ``alpha, beta``
-     3. Construction of the reduced structure function from
-         ``S(Q)-1 = (alpha*I(Q) + beta - <f²>(Q)) / <f>(Q)²`` and ``F(Q)=Q*(S(Q)-1)``
+       (``bgscale`` can be optimised automatically, see below)
+    2. Robust high-Q affine scaling ``alpha, beta``
+    3. Reduced structure function from
+       ``S(Q)-1 = (alpha*I(Q) + beta - <f²>(Q)) / <f>(Q)²`` and ``F(Q)=Q*(S(Q)-1)``
     4. Polynomial background removal (PDFgetX3 convention, controlled by ``rpoly``)
-     5. Optional Lorch modification function with partial RMS renormalization
-         to suppress Fourier ripples while limiting amplitude bias
+    5. Optional Lorch modification with partial RMS renormalization
     6. Sine Fourier transform to obtain G(r)
 
     Parameters
@@ -310,30 +537,38 @@ def compute_xPDF(
     Iref : ndarray, optional
         Reference (background) intensity profile. If its length differs from
         ``Iexp``, it is interpolated onto the ``q`` grid. Default is ``None``.
-    bgscale : float, optional
-        Scaling factor applied to the reference before subtraction. Default is 1.0.
+    bgscale : float or "auto", optional
+        Scale factor applied to ``Iref`` before subtraction. If ``"auto"``,
+        it is optimised so that the first PDF peak, searched in
+        ``[r_peak - r_tol, r_peak + r_tol]``, has maximal height.
+        Requires ``Iref``. Default is 1.0.
     qmin : float, optional
         Minimum Q used for the Fourier transform (Å⁻¹). Default is 0.3.
     qmax : float, optional
         Maximum Q used for the Fourier transform (Å⁻¹). Defaults to ``q.max()``.
     qmaxinst : float, optional
         Maximum Q used for the polynomial background fit. Defaults to ``qmax``.
-        Useful when the data are noisy near ``qmax``.
-    rmin : float, optional
-        Minimum real-space distance r (Å). Default is 0.0.
-    rmax : float, optional
-        Maximum real-space distance r (Å). Default is 50.0.
+    rmin, rmax : float, optional
+        Real-space range (Å). Defaults are 0.0 and 50.0.
     rstep : float, optional
         Step size in real space (Å). Default is 0.01.
     rpoly : float, optional
-        Polynomial degree control for background removal (PDFgetX3 convention).
-        Default is 1.4.
+        Polynomial degree control for background removal. Default is 1.4.
     Lorch : bool, optional
-        If ``True`` (default), apply the Lorch modification function
-        ``sinc(Q/Qmax)`` before the Fourier transform to reduce termination ripples.
+        If ``True`` (default), apply the Lorch modification function.
     plot : bool, optional
-        If ``True``, display diagnostic plots of the raw intensities, F(Q),
-        and G(r). Default is ``False``.
+        If ``True``, display diagnostic plots. Default is ``False``.
+    r_peak : float, optional
+        Expected position (Å) of the first peak, used when ``bgscale="auto"``.
+        Default 2.8.
+    r_tol : float, optional
+        Half-width (Å) of the peak search window. Default 0.2.
+    bg_bounds : tuple of float, optional
+        Search interval for ``bgscale`` when ``"auto"``. Default (0, 2).
+    n_scan : int, optional
+        Number of points of the coarse scan when ``"auto"``. Default 41.
+    return_bgscale : bool, optional
+        If True, also return the ``bgscale`` actually used. Default False.
 
     Returns
     -------
@@ -341,101 +576,48 @@ def compute_xPDF(
         Real-space distance axis in Å.
     G : ndarray
         Reduced pair distribution function G(r) in Å⁻².
+    bgscale : float
+        Only if ``return_bgscale=True``.
 
     Notes
     -----
     The high-Q scaling is estimated on the top 10 % of the Q range
-    (``q > 0.9 * qmax``) using an affine form with robust safeguards:
-    ``S(Q)-1 = (alpha*I(Q) + beta - <f²>(Q)) / <f>(Q)²``.
+    (``q > 0.9 * qmax``) using an affine form with robust safeguards.
     """
-    if qmax is None or qmax > q.max():
-        qmax = q.max()
-    if qmaxinst is None or qmaxinst > q.max():
-        qmaxinst = qmax
+    q, Iexp, Iref, qmax, qmaxinst, f2avg, favg = _prepare_normalization(
+        q, Iexp, Iref, composition, qmax, qmaxinst, xray=True,
+    )
     Iraw = Iexp.copy()
 
-    # --- Interpolate over NaN/Inf bins (from masked radial bins) ---
-    finite_exp = np.isfinite(Iexp)
-    if not np.all(finite_exp):
-        Iexp = np.interp(q, q[finite_exp], Iexp[finite_exp])
-        Iraw = Iexp.copy()
+    # --- Automatic background scale ---
+    auto = isinstance(bgscale, str) and bgscale.lower() == "auto"
+    if auto:
+        if Iref is None:
+            raise ValueError('bgscale="auto" requires a reference profile Iref.')
+        bgscale, h_pk, r_pk = _auto_bgscale(
+            q, Iexp, Iref, f2avg, favg, qmin, qmax, qmaxinst, rpoly, Lorch,
+            r_peak=r_peak, r_tol=r_tol, bg_bounds=bg_bounds,
+            n_scan=n_scan, rstep=min(rstep, 0.01),
+        )
+        print(f"[compute_xPDF] auto bgscale = {bgscale:.4f} "
+              f"(peak G = {h_pk:.3f} at r = {r_pk:.2f} Å)")
 
     # --- Background subtraction ---
-    if Iref is not None:
-        finite_ref = np.isfinite(Iref)
-        if not np.all(finite_ref) and finite_ref.any():
-            q_ref_full = np.linspace(q[0], q[-1], len(Iref))
-            Iref = np.interp(q, q_ref_full[finite_ref], Iref[finite_ref])
-        elif len(Iref) != len(Iexp):
-            q_ref = np.linspace(q[0], q[-1], len(Iref))
-            Iref = np.interp(q, q_ref, Iref)
+    I = Iexp - bgscale * Iref if Iref is not None else Iexp
 
-    if Iref is not None:
-        Iexp = Iexp - bgscale * Iref
-
-    qstep = q[1] - q[0]
-
-    # --- X-ray scattering normalization ---
-    q_f2, f2avg = compute_f2avg(
-        composition,
-        x_max=qmax,
-        x_step=qstep,
-        qvalues=True,
-        xray=True,
-    )
-    f2avg = np.interp(q, q_f2, f2avg)
-
-    q_f, favg = compute_avg_scattering_factor(
-        composition,
-        x_max=qmax,
-        x_step=qstep,
-        qvalues=True,
-        xray=True,
-    )
-    favg = np.interp(q, q_f, favg)
-
-    alpha, beta = _estimate_high_q_affine_scale(
-        q=q,
-        Iexp=Iexp,
-        f2avg=f2avg,
-        favg=favg,
-        qmax=qmax,
-        tail_fraction=0.1,
-    )
-
-    # --- Modified intensity F(Q) ---
-    favg2 = np.maximum(favg**2, np.finfo(float).eps)
-    S_minus_1 = (alpha * Iexp + beta - f2avg) / favg2
-    Fm = q * S_minus_1
-
-    # --- Polynomial background (PDFgetX3 philosophy) ---
-    background = fit_polynomial_background(
-        q, Fm, rpoly=rpoly, qmin=qmin, qmax=qmaxinst
-    )
-
-    Fc = Fm - background
-
-    # --- Fourier transform ---
+    # --- Full G(r) ---
     r = np.arange(rmin, rmax + rstep, rstep)
-    mask = (q >= qmin) & (q <= qmax)
-    qv = q[mask]
+    G, Fc = _xpdf_core(
+        q, I, f2avg, favg, r, qmin, qmax, qmaxinst, rpoly, Lorch,
+    )
 
-    if Lorch:
-        Fv = Fc[mask] * _lorch_with_partial_rms_renorm(qv, qmax, exponent=0.7)
-    else:
-        Fv = Fc[mask]
-
-    integrand = Fv[None, :] * np.sin(np.outer(r, qv))
-    trapz_func = getattr(np, 'trapezoid', np.trapz)
-    G = (2 / np.pi) * trapz_func(integrand, qv, axis=1)
-
-    # Optional diagnostic plots
+    # --- Optional diagnostic plots ---
     if plot:
         fig, ax = plt.subplots(3, figsize=(4, 6))
 
         ax[0].plot(q, Iraw, label="Iexp")
         if Iref is not None:
-            ax[0].plot(q, bgscale * Iref, label="Ref*bgscale")
+            ax[0].plot(q, bgscale * Iref, label=f"Ref*{bgscale:.3f}")
         ax[0].legend()
         ax[0].set_xlabel("Q ($\\AA^{-1}$)")
         ax[0].set_ylabel("Intensity")
@@ -457,6 +639,8 @@ def compute_xPDF(
             ax[1].set_ylim([0, 1])
 
         ax[2].plot(r, G, label=f"rpoly={rpoly:.2f}")
+        if auto:
+            ax[2].axvspan(r_peak - r_tol, r_peak + r_tol, alpha=0.15, color="C1")
         ax[2].legend()
         ax[2].set_xlabel("r ($\\AA$)")
         ax[2].set_ylabel("G(r)")
@@ -464,5 +648,6 @@ def compute_xPDF(
         fig.tight_layout()
         plt.show()
 
+    if return_bgscale:
+        return r, G, bgscale
     return r, G
-

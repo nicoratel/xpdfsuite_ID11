@@ -10,6 +10,7 @@ import plotly.graph_objects as go
 
 from xpdfsuite_ID11 import XRDProcessor
 from xpdfsuite_ID11.app_utilities import open_fig_in_browser
+from xpdfsuite_ID11.pdf_extraction import auto_bgscale
 from xpdfsuite_ID11.utilities_process import (
     compute_reaction_time_stop_flow,
     convert_position_to_time,
@@ -47,16 +48,62 @@ def render(cfg: ExperimentConfig) -> None:
 
     st.markdown("## 📈 Plot raw data")
 
+    # ========== DÉTECTION AUTOMATIQUE DU BGSCALE ==========
+    if "composition_iq" not in st.session_state:
+        st.session_state["composition_iq"] = st.session_state.get("composition", "Au")
+    composition_iq = st.text_input(
+        "Chemical composition (pour la détection auto du bgscale)",
+        key="composition_iq",
+        placeholder="e.g., Au, NaCl, Au3Cu",
+    )
+    auto_bgscale_enabled = st.checkbox(
+        "🔍 Détection automatique du bgscale (1er pic PDF)",
+        value=st.session_state.get("auto_bgscale_enabled_iq", False),
+        key="auto_bgscale_enabled_iq",
+        help="Recherche le bgscale qui maximise la hauteur du premier pic de G(r).",
+    )
+    if auto_bgscale_enabled:
+        if st.button("🔄 Calculer bgscale optimal", key="btn_auto_bgscale_iq"):
+            if sample_file is None or ref_file is None:
+                st.error("Fichiers échantillon et référence requis pour la détection automatique.")
+            else:
+                with st.spinner("Calcul du bgscale optimal..."):
+                    sample_processor0 = XRDProcessor(
+                        sample_file, frame=0, poni_file=poni_file, mask=mask_path,
+                        dark=dark, flat=flat, spline=spline,
+                        polarization_factor=polarization, entry=entry_sample,
+                    )
+                    ref_processor0 = XRDProcessor(
+                        ref_file, frame=0, poni_file=poni_file, mask=mask_path,
+                        dark=dark, flat=flat, spline=spline,
+                        polarization_factor=polarization, entry=entry_ref,
+                    )
+                    q0, I0 = sample_processor0.integrate()
+                    q0ref, Iref0 = ref_processor0.integrate()
+                    Iref0 = np.interp(q0, q0ref, Iref0)
+                    try:
+                        bg_opt, h_opt, r_found = auto_bgscale(q0, I0, Iref0, composition_iq)
+                        st.session_state["bgscale_value_iq"] = bg_opt
+                        st.session_state["bgscale"] = bg_opt
+                        st.success(
+                            f"bgscale optimal = {bg_opt:.4f} "
+                            f"(pic G(r) = {h_opt:.3f} à r = {r_found:.2f} Å)"
+                        )
+                    except Exception as exc:
+                        st.error(f"Échec de la détection automatique : {exc}")
+
     # ========== PLOT RAW DATA SECTION ==========
     #checkbox to substract reference data
     subtract_ref = st.checkbox("Subtract reference data", value=False)
     # slider bgscale
+    if "bgscale_value_iq" not in st.session_state:
+        st.session_state["bgscale_value_iq"] = st.session_state.get("bgscale", 1.0)
     bgscale = st.slider(
         "Background scaling factor",
         min_value=0.0,
         max_value=2.0,
-        value=1.0,
         step=0.01,
+        key="bgscale_value_iq",
         help="Scaling factor for the background subtraction. It should be kept < 2.0",
     )
     # save the bgscale value in session state
