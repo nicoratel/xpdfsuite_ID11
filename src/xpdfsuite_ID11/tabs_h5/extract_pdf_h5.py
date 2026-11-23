@@ -7,9 +7,9 @@ import numpy as np
 import streamlit as st
 import plotly.graph_objects as go
 
-from xpdfsuite_ID11 import extract_xpdf, XRDProcessor
+from xpdfsuite_ID11 import XRDProcessor
 from xpdfsuite_ID11.app_utilities import open_fig_in_browser
-from xpdfsuite_ID11.pdf_extraction import auto_bgscale
+from xpdfsuite_ID11.pdf_extraction import auto_bgscale, compute_xPDF
 
 from .configure_h5 import H5Config
 
@@ -19,6 +19,16 @@ def _make_processor(file, frame, entry, cfg: H5Config) -> XRDProcessor:
         file, frame=frame, poni_file=cfg.poni_file, mask=cfg.mask_file,
         dark=cfg.dark_file, flat=cfg.flat_file, spline=cfg.spline_file,
         polarization_factor=cfg.polarization, entry=entry,
+    )
+
+
+def _integration_key(cfg: H5Config, sample_file, ref_file) -> tuple:
+    """Identify the inputs that require re-running the (costly) azimuthal integration."""
+    return (
+        sample_file, cfg.frame_sample, cfg.entry_sample,
+        ref_file, cfg.frame_ref, cfg.entry_ref,
+        cfg.poni_file, cfg.mask_file, cfg.dark_file, cfg.flat_file, cfg.spline_file,
+        cfg.polarization,
     )
 
 
@@ -39,6 +49,35 @@ def render(cfg: H5Config) -> None:
     if sample_file is None or cfg.poni_file is None:
         st.warning("⚠️ Please select the sample H5 file and the PONI file in the Configuration tab.")
         return
+
+    # ========== INTEGRATION (cached: only re-run when the sample/ref/calibration change) ==========
+    integration_key = _integration_key(cfg, sample_file, ref_file)
+    if st.session_state.get("_pdf_integration_key") != integration_key:
+        st.session_state["_pdf_integration_key"] = integration_key
+        st.session_state["_pdf_integration_error"] = None
+        try:
+            with st.spinner("Intégration azimutale en cours..."):
+                sample_processor = _make_processor(sample_file, cfg.frame_sample, cfg.entry_sample, cfg)
+                if not np.any(sample_processor.img):
+                    raise ValueError(
+                        "The selected sample image is entirely zero. Check the entry/frame, and that "
+                        "the H5 file's linked raw data files are next to it."
+                    )
+                q_sample, I_sample = sample_processor.integrate(plot=False)
+
+                I_ref = None
+                if ref_file is not None:
+                    ref_processor = _make_processor(ref_file, cfg.frame_ref, cfg.entry_ref, cfg)
+                    q_ref, I_ref_raw = ref_processor.integrate(plot=False)
+                    I_ref = np.interp(q_sample, q_ref, I_ref_raw)
+
+                st.session_state["samplename"] = sample_processor.samplename
+                st.session_state["_pdf_q_sample"] = q_sample
+                st.session_state["_pdf_I_sample"] = I_sample
+                st.session_state["_pdf_I_ref"] = I_ref
+        except Exception as exc:
+            st.session_state["_pdf_integration_error"] = str(exc)
+            st.session_state["_pdf_q_sample"] = None
 
     # ========== INPUT PARAMETERS SECTION ==========
     st.markdown("## 📋 Input Parameters")
@@ -61,17 +100,25 @@ def render(cfg: H5Config) -> None:
 
     with col_out2:
         st.markdown("**Gamme de Q utilisée pour l'extraction**")
-        qmin = st.number_input("qmin (Å⁻¹)", value=_default_qmin, step=0.01)
-        qmax = st.number_input("qmax (Å⁻¹)", value=_default_qmax, step=0.01)
+        qmin = st.slider(
+            "qmin (Å⁻¹)", min_value=0.0, max_value=10.0,
+            value=_default_qmin, step=0.01, key="qmin_slider",
+        )
+        qmax = st.slider(
+            "qmax (Å⁻¹)", min_value=5.0, max_value=40.0,
+            value=_default_qmax, step=0.01, key="qmax_slider",
+        )
 
     with col_out3:
         st.markdown("**Paramètres pour la soustraction polynomiale**")
-        qmaxinst = st.number_input(
-            "qmaxinst (Å⁻¹)", value=_default_qmaxinst, step=0.01,
+        qmaxinst = st.slider(
+            "qmaxinst (Å⁻¹)", min_value=5.0, max_value=40.0,
+            value=_default_qmaxinst, step=0.01, key="qmaxinst_slider",
             help="Maximum Q value for the instrument correction. If None, the maximum Q value will be used.",
         )
-        rpoly = st.number_input(
-            "rpoly", value=_default_rpoly, step=0.01,
+        rpoly = st.slider(
+            "rpoly", min_value=0.0, max_value=3.0,
+            value=_default_rpoly, step=0.01, key="rpoly_slider",
             help="Polynomial correction parameter. It should be kept < 1.5.",
         )
         lorch = st.checkbox(
@@ -96,15 +143,15 @@ def render(cfg: H5Config) -> None:
                 key="r_peak_auto",
             )
             if st.button("🔄 Calculer bgscale optimal", key="btn_auto_bgscale_extract"):
-                if ref_file is None:
+                q0 = st.session_state.get("_pdf_q_sample")
+                I0 = st.session_state.get("_pdf_I_sample")
+                Iref0 = st.session_state.get("_pdf_I_ref")
+                if ref_file is None or Iref0 is None:
                     st.error("Fichiers échantillon et référence requis pour la détection automatique.")
+                elif q0 is None:
+                    st.error(f"Intégration indisponible : {st.session_state.get('_pdf_integration_error')}")
                 else:
                     with st.spinner("Calcul du bgscale optimal..."):
-                        sample_processor0 = _make_processor(sample_file, cfg.frame_sample, cfg.entry_sample, cfg)
-                        ref_processor0 = _make_processor(ref_file, cfg.frame_ref, cfg.entry_ref, cfg)
-                        q0, I0 = sample_processor0.integrate()
-                        q0ref, Iref0 = ref_processor0.integrate()
-                        Iref0 = np.interp(q0, q0ref, Iref0)
                         try:
                             bg_opt, h_opt, r_found = auto_bgscale(
                                 q0, I0, Iref0, composition,
@@ -121,43 +168,32 @@ def render(cfg: H5Config) -> None:
 
         if "bgscale_value" not in st.session_state:
             st.session_state["bgscale_value"] = _default_bgscale
-        bgscale = st.number_input(
-            "bgscale", step=0.01, key="bgscale_value",
+        bgscale = st.slider(
+            "bgscale", min_value=0.0, max_value=2.5, step=0.01, key="bgscale_value",
             help="Scaling factor for the background subtraction. It should be kept < 1.5.",
         )
         st.session_state["bgscale"] = bgscale
 
-    if st.button("Calculer PDF", type="primary"):
+    if st.session_state.get("_pdf_integration_error"):
+        st.error(f"❌ Error integrating data: {st.session_state['_pdf_integration_error']}")
+    elif st.session_state.get("_pdf_q_sample") is not None:
         try:
             with st.spinner("Calcul de la PDF en cours..."):
-                sample_processor = _make_processor(sample_file, cfg.frame_sample, cfg.entry_sample, cfg)
-                if not np.any(sample_processor.img):
-                    raise ValueError(
-                        "The selected sample image is entirely zero. Check the entry/frame, and that "
-                        "the H5 file's linked raw data files are next to it."
-                    )
-
-                ref_processor = None
-                if ref_file is not None:
-                    ref_processor = _make_processor(ref_file, cfg.frame_ref, cfg.entry_ref, cfg)
-
-                st.session_state["samplename"] = sample_processor.samplename
-
-                r, G = extract_xpdf(
-                    sample_processor,
-                    ref_processor=ref_processor,
-                    composition=composition,
-                    rmin=rmin,
-                    rmax=rmax,
-                    rstep=rstep,
-                    interactive=False,
-                    plot=False,
+                r, G = compute_xPDF(
+                    st.session_state["_pdf_q_sample"],
+                    st.session_state["_pdf_I_sample"],
+                    composition,
+                    Iref=st.session_state.get("_pdf_I_ref"),
                     bgscale=bgscale,
                     qmin=qmin,
                     qmax=qmax,
                     qmaxinst=qmaxinst,
+                    rmin=rmin,
+                    rmax=rmax,
+                    rstep=rstep,
                     rpoly=rpoly,
-                    # Lorch=lorch,
+                    Lorch=True,
+                    plot=False,
                 )
 
             fig = go.Figure(
