@@ -3,6 +3,9 @@ pyproject.toml
 setup.py
 src/xpdfsuite_ID11/__init__.py
 src/xpdfsuite_ID11/_launcher.py
+src/xpdfsuite_ID11/_launcher_h5.py
+src/xpdfsuite_ID11/app_h5_processor.py
+src/xpdfsuite_ID11/app_utilities.py
 src/xpdfsuite_ID11/app_xpdfsuite.py
 src/xpdfsuite_ID11/calibration.py
 src/xpdfsuite_ID11/compute_f0.py
@@ -11,6 +14,7 @@ src/xpdfsuite_ID11/elements_info.yaml
 src/xpdfsuite_ID11/filereader.py
 src/xpdfsuite_ID11/id11data.py
 src/xpdfsuite_ID11/monitor_pdfpeaks.py
+src/xpdfsuite_ID11/monitor_pdfpeaks_backup.py
 src/xpdfsuite_ID11/pdf_extraction.py
 src/xpdfsuite_ID11/peakfit.py
 src/xpdfsuite_ID11/utilities.py
@@ -22,3 +26,14 @@ src/xpdfsuite_ID11.egg-info/dependency_links.txt
 src/xpdfsuite_ID11.egg-info/entry_points.txt
 src/xpdfsuite_ID11.egg-info/requires.txt
 src/xpdfsuite_ID11.egg-info/top_level.txt
+src/xpdfsuite_ID11/tabs/__init__.py
+src/xpdfsuite_ID11/tabs/configure.py
+src/xpdfsuite_ID11/tabs/extract_pdf.py
+src/xpdfsuite_ID11/tabs/fit_iq.py
+src/xpdfsuite_ID11/tabs/gr_evolution.py
+src/xpdfsuite_ID11/tabs/monitor_pdfpeaks.py
+src/xpdfsuite_ID11/tabs/plot_iq.py
+src/xpdfsuite_ID11/tabs_h5/__init__.py
+src/xpdfsuite_ID11/tabs_h5/configure_h5.py
+src/xpdfsuite_ID11/tabs_h5/extract_pdf_h5.py
+src/xpdfsuite_ID11/tabs_h5/plot_iq_h5.py

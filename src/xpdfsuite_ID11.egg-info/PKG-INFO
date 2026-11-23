@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: xpdfsuite_ID11
-Version: 0.1.5
+Version: 0.1.7
 Summary: Python toolkit for X-ray pair distribution function (xPDF) analysis from ID11 data
 Author: Nicolas Ratel-Ramond
 License: MIT

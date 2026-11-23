@@ -1,2 +1,3 @@
 [console_scripts]
+xpdfsuite-h5-processor = xpdfsuite_ID11._launcher_h5:main_h5_processor
 xpdfsuite-monitor = xpdfsuite_ID11._launcher:main_monitor
