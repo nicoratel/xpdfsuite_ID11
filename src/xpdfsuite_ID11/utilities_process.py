@@ -187,7 +187,7 @@ def process_lost_flow(file,
                       frame_binning=1,
                       entry_sample=None,
                       entry_ref=None,
-                      motor_names=('difftz', 'samty', 'samtz'),
+                      motor_names=('difftz', 'samty'),#, 'samtz'),
                       position_tol=0.05):
     """
     Process a series of images from a lost-flow experiment, extracting the PDF for each frame.
