@@ -225,6 +225,58 @@ class ID11Data:
             for i in range(self.nb_frames[entry]):
                 yield entry, i, self._scaled(self.data[entry][i], self.get_scale(entry, i))
 
+    def get_mean_image(self, entry=None, normalize=None, mask_invalid=True, chunk=20):
+        """Image moyenne d'une entrée (float32, shape = (h, w)).
+
+        Lecture par blocs de `chunk` frames : la mémoire utilisée reste bornée,
+        quel que soit le nombre de frames.
+
+        Paramètres
+        ----------
+        entry : str, optionnel
+            Entrée à moyenner (self.entry par défaut).
+        normalize : bool, optionnel
+            Applique la normalisation par la dose avant de moyenner.
+            Par défaut : self.normalize.
+        mask_invalid : bool
+            Pour les images entières, exclut de la moyenne les pixels égaux à la valeur
+            max du dtype (pixels morts/saturés de l'Eiger), pixel par pixel. Si un pixel
+            est invalide sur toutes les frames, il vaut NaN.
+        chunk : int
+            Nombre de frames lues à la fois (~18 Mo/frame en float32 pour un Eiger 2M).
+        """
+        entry = entry or self.entry
+        ds = self.data[entry]
+        if ds.ndim != 3:
+            raise ValueError(f"[{entry}] dataset de dimension {ds.ndim}, 3 attendue (frames, h, w).")
+        do_norm = self.normalize if normalize is None else normalize
+        scale = self.get_scale(entry) if do_norm else np.ones(self.nb_frames[entry])
+
+        invalid_value = np.iinfo(ds.dtype).max if (mask_invalid and ds.dtype.kind in 'ui') else None
+        total = np.zeros(ds.shape[1:], dtype=np.float64)
+        count = np.zeros(ds.shape[1:], dtype=np.int64)
+
+        for start in range(0, self.nb_frames[entry], chunk):
+            stop = min(start + chunk, self.nb_frames[entry])
+            block = ds[start:stop]
+            if invalid_value is not None:
+                valid = block != invalid_value
+            else:
+                valid = np.ones(block.shape, dtype=bool)
+            block = block.astype(np.float32) * scale[start:stop, None, None].astype(np.float32)
+            total += np.where(valid, block, 0).sum(axis=0, dtype=np.float64)
+            count += valid.sum(axis=0)
+
+        with np.errstate(invalid='ignore', divide='ignore'):
+            mean = total / count
+        mean[count == 0] = np.nan
+        return mean.astype(np.float32)
+
+    def get_mean_images(self, **kwargs):
+        """Image moyenne de chaque entrée : {entry: ndarray}. Les kwargs sont passés
+        à get_mean_image (normalize, mask_invalid, chunk)."""
+        return {e: self.get_mean_image(e, **kwargs) for e in self.entries}
+
     # ------------------------------------------------------------------
     def get_eiger_source(self, entry):
         """Résout le softlink/Virtual Dataset des images eiger d'une entrée."""
