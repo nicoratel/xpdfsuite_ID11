@@ -1,8 +1,10 @@
-import h5py
 import os
+import re
+import warnings
+
+import h5py
 import hdf5plugin  # nécessaire pour décompresser les images eiger (filtre bitshuffle/lz4)
 import numpy as np
-import re
 
 os.environ['HDF5_PLUGIN_PATH'] = hdf5plugin.PLUGIN_PATH
 
@@ -19,7 +21,8 @@ DETECTOR_INFO_KEYS = [
     'description', 'type', 'serial_number',
     'saturation_value', 'bit_depth_image', 'bit_depth_readout',
     'threshold_energy', 'countrate_correction_count_cutoff',
-    'sensor_material', 'sensor_thickness', 'layout', 'wavelength', 'image_width', 'image_height'
+    'sensor_material', 'sensor_thickness', 'layout', 'wavelength',
+    'image_width', 'image_height',
 ]
 
 
@@ -28,21 +31,45 @@ class ID11Data:
 
     Que le fichier ne contienne qu'un seul scan ou plusieurs, l'API est la même :
     tous les attributs de métadonnées sont des dictionnaires indexés par entry
-    (ex: 'eiger', 'frelon3'), ex : ``self.data['2.1']``, ``self.nb_frames['2.1']``.
+    (ex: '2.1', '10.1'), ex : ``self.data['2.1']``, ``self.nb_frames['2.1']``.
 
-    Pour compatibilité et confort quand il n'y a qu'une entry (ou qu'on veut une
-    entry "par défaut"), ``self.entry`` pointe vers la première entry trouvée.
+    ``self.entry`` pointe vers la première entry trouvée (entry "par défaut").
+
+    Normalisation (paresseuse)
+    --------------------------
+    Les images ne sont JAMAIS modifiées en mémoire : ``self.data[entry]`` reste un
+    ``h5py.Dataset`` brut. La correction est appliquée à la volée dans
+    ``get_frame`` / ``iter_frames`` :
+
+        frame_norm = frame * dose_ref / dose_i
+
+    avec ``dose_i = I_i * t_i`` (courant pico4 x temps d'exposition), ou
+    ``dose_i = I_i`` si ``integrated=True`` (fpico4 déjà intégré sur l'exposition).
+    ``dose_ref`` est la dose moyenne sur toutes les entries, ce qui conserve
+    l'ordre de grandeur des coups et permet de comparer les entries entre elles.
+
+    Pour la propagation d'erreur (Poisson) : sigma_norm = sqrt(N_brut) * get_scale(...).
+
+    Paramètres
+    ----------
+    normalize : bool
+        Applique la normalisation par la dose dans get_frame / iter_frames.
+    integrated : bool
+        True si fpico4 est une charge/un nombre de coups déjà intégré sur le temps
+        d'exposition (on ne multiplie alors pas par t). False si c'est un courant moyen.
     """
 
     DETECTORS = ('eiger', 'frelon3')
 
-    def __init__(self, file_path, verbose=False):
+    def __init__(self, file_path, verbose=False, normalize=True, integrated=False):
         self.file_path = file_path
         self.h5_file = h5py.File(file_path, 'r')
+        self.normalize = normalize
+        self.integrated = integrated
 
-        # --- entrées et datasets (lazy, h5py.Dataset, pas encore chargés en mémoire) ---
+        # --- entrées et datasets (lazy, h5py.Dataset, pas chargés en mémoire) ---
         self.detector_names = {}   # {entry: 'eiger' | 'frelon3'}
-        self.data = {}             # {entry: h5py.Dataset}
+        self.data = {}             # {entry: h5py.Dataset} (données brutes)
         self.entries = self.list_entries()
         if not self.entries:
             raise KeyError("Aucune entrée avec 'measurement/eiger' ou 'measurement/frelon3'.")
@@ -53,7 +80,7 @@ class ID11Data:
 
         self.nb_frames = {e: ds.shape[0] for e, ds in self.data.items()}
         self.total_frames = sum(self.nb_frames.values())
-        # offsets[i] = indice global de la 1re frame de l'entrée i (utile pour get_frame global)
+        # offsets[i] = indice global de la 1re frame de l'entrée i (pour get_frame global)
         self._offsets = np.cumsum([0] + [self.nb_frames[e] for e in self.entries])
 
         # --- métadonnées par entrée ---
@@ -66,8 +93,17 @@ class ID11Data:
         self.command = {e: t.get('title') for e, t in self.times.items()}
         self.detector_info = {e: self.get_detector_info(e) for e in self.entries}
 
-        # entry "par défaut" : la première trouvée (comportement rétro-compatible
-        # pour du code qui suppose une seule entry, ex: self.entry, self.epoch[self.entry]...)
+        # --- monitor / dose (normalisation de l'intensité, évolution du courant synchrotron) ---
+        # NB : doit venir après self.nb_frames et self.times
+        self.monitor = {e: self.get_monitor(e) for e in self.entries}
+        self.dose = {e: self.get_dose(e) for e in self.entries}
+        valid = [d for d in self.dose.values() if d is not None]
+        self.dose_ref = float(np.mean(np.concatenate(valid))) if valid else None
+        if self.normalize and valid and len(valid) != len(self.entries):
+            missing = [e for e, d in self.dose.items() if d is None]
+            warnings.warn(f"Entries sans dose valide (non normalisées) : {missing}")
+
+        # entry "par défaut" : la première trouvée
         self.entry = self.entries[0]
 
         if verbose:
@@ -93,20 +129,101 @@ class ID11Data:
         return entries
 
     # ------------------------------------------------------------------
+    # Normalisation
+    # ------------------------------------------------------------------
+    def get_monitor(self, entry):
+        """Signal pico4 par frame (1D float64), ou None si absent / invalide."""
+        node = self.h5_file.get(f'{entry}/measurement/fpico4')
+        if node is None:
+            return None
+        mon = np.asarray(node[()], dtype=np.float64)
+        if mon.shape != (self.nb_frames[entry],):
+            warnings.warn(f"[{entry}] pico4 {mon.shape} != {self.nb_frames[entry]} frames : "
+                          "pas de normalisation")
+            return None
+        if not np.all(np.isfinite(mon) & (mon > 0)):
+            warnings.warn(f"[{entry}] pico4 contient des valeurs <= 0 ou non finies : "
+                          "pas de normalisation")
+            return None
+        return mon
+
+    def get_exposure(self, entry):
+        """Temps d'exposition par frame (1D float64), ou None si indisponible."""
+        expo = self.times[entry].get('acq_expo_time')
+        if expo is None:
+            return None
+        expo = np.atleast_1d(np.asarray(expo, dtype=np.float64))
+        nb = self.nb_frames[entry]
+        if expo.size == 1:
+            return np.full(nb, expo[0])      # constant dans ce scan
+        if expo.shape == (nb,):
+            return expo                      # un temps par frame
+        warnings.warn(f"[{entry}] acq_expo_time {expo.shape} incompatible avec {nb} frames")
+        return None
+
+    def get_dose(self, entry):
+        """Dose relative reçue par frame : I_i * t_i (ou I_i si fpico4 est intégré)."""
+        mon = self.monitor.get(entry) if hasattr(self, 'monitor') else self.get_monitor(entry)
+        if mon is None:
+            return None
+        if self.integrated:
+            return mon
+        expo = self.get_exposure(entry)
+        if expo is None or not np.all(np.isfinite(expo) & (expo > 0)):
+            warnings.warn(f"[{entry}] temps d'exposition invalide : pas de normalisation")
+            return None
+        return mon * expo
+
+    def get_scale(self, entry, index=None):
+        """Facteur multiplicatif dose_ref / dose_i.
+
+        - index donné : scalaire pour la frame `index` de `entry`
+        - index=None  : tableau 1D pour toutes les frames de `entry`
+        Renvoie 1.0 si la normalisation est désactivée ou indisponible.
+        """
+        d = self.dose[entry]
+        if not self.normalize or d is None:
+            return 1.0 if index is not None else np.ones(self.nb_frames[entry])
+        scale = self.dose_ref / d
+        return scale if index is None else scale[index]
+
+    def _scaled(self, frame, scale):
+        """Applique `scale` en float32 en masquant les pixels morts/saturés (-> NaN)."""
+        if scale == 1.0:
+            return frame
+        out = frame.astype(np.float32)
+        if frame.dtype.kind in 'ui':
+            # l'Eiger code les pixels invalides par la valeur max du dtype
+            out[frame == np.iinfo(frame.dtype).max] = np.nan
+        out *= np.float32(scale)
+        return out
+
+    # ------------------------------------------------------------------
     def get_frame(self, index, entry=None):
         """Si entry est donnée : frame `index` de cette entrée.
-        Sinon : `index` est un indice global sur toutes les entrées concaténées."""
-        if entry is not None:
-            return self.data[entry][index]
-        if not 0 <= index < self.total_frames:
-            raise IndexError(index)
-        i = np.searchsorted(self._offsets, index, side='right') - 1
-        return self.data[self.entries[i]][index - self._offsets[i]]
+        Sinon : `index` est un indice global sur toutes les entrées concaténées.
+        La frame est normalisée par la dose si `self.normalize` (voir docstring)."""
+        if entry is None:
+            if not 0 <= index < self.total_frames:
+                raise IndexError(index)
+            i = np.searchsorted(self._offsets, index, side='right') - 1
+            entry, index = self.entries[i], int(index - self._offsets[i])
+        frame = self.data[entry][index]
+        return self._scaled(frame, self.get_scale(entry, index))
+
+    def get_raw_frame(self, index, entry=None):
+        """Comme get_frame, mais sans aucune normalisation."""
+        if entry is None:
+            if not 0 <= index < self.total_frames:
+                raise IndexError(index)
+            i = np.searchsorted(self._offsets, index, side='right') - 1
+            entry, index = self.entries[i], int(index - self._offsets[i])
+        return self.data[entry][index]
 
     def iter_frames(self):
         for entry in self.entries:
             for i in range(self.nb_frames[entry]):
-                yield entry, i, self.data[entry][i]
+                yield entry, i, self._scaled(self.data[entry][i], self.get_scale(entry, i))
 
     # ------------------------------------------------------------------
     def get_eiger_source(self, entry):
@@ -220,6 +337,12 @@ class ID11Data:
                 product = int(np.prod([v.shape[0] for v in motors.values()]))
                 if product == nb:
                     print(f"  Le produit des points ({product}) correspond au nb de frames.")
+            d = self.dose[entry]
+            if d is None:
+                print("  Normalisation : indisponible (pas de dose valide)")
+            else:
+                s = self.dose_ref / d
+                print(f"  Normalisation : facteur min/max = {s.min():.3f} / {s.max():.3f}")
 
     def close(self):
         """Ferme le fichier HDF5."""
