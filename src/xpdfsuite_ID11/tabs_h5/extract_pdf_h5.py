@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import traceback
 import numpy as np
 import streamlit as st
 import plotly.graph_objects as go
@@ -25,11 +26,58 @@ def _make_processor(file, frame, entry, cfg: H5Config) -> XRDProcessor:
 def _integration_key(cfg: H5Config, sample_file, ref_file) -> tuple:
     """Identify the inputs that require re-running the (costly) azimuthal integration."""
     return (
-        sample_file, cfg.frame_sample, cfg.entry_sample,
-        ref_file, cfg.frame_ref, cfg.entry_ref,
-        cfg.poni_file, cfg.mask_file, cfg.dark_file, cfg.flat_file, cfg.spline_file,
+        str(sample_file), cfg.frame_sample, cfg.entry_sample,
+        str(ref_file), cfg.frame_ref, cfg.entry_ref,
+        str(cfg.poni_file), str(cfg.mask_file), str(cfg.dark_file),
+        str(cfg.flat_file), str(cfg.spline_file),
         cfg.polarization,
     )
+
+
+def _ensure_integration(cfg: H5Config, sample_file, ref_file, force: bool = False) -> bool:
+    """Run the azimuthal integration if inputs changed (or if forced).
+
+    The cache key is stored ONLY on success, so a failure is retried next time.
+    Returns True if integrated data are available.
+    """
+    key = _integration_key(cfg, sample_file, ref_file)
+    ok = (
+        st.session_state.get("_pdf_integration_key") == key
+        and st.session_state.get("_pdf_q_sample") is not None
+    )
+    if ok and not force:
+        return True
+
+    st.session_state["_pdf_integration_key"] = None
+    st.session_state["_pdf_integration_error"] = None
+    st.session_state["_pdf_q_sample"] = None
+    st.session_state["_pdf_I_sample"] = None
+    st.session_state["_pdf_I_ref"] = None
+    try:
+        with st.spinner("Intégration azimutale en cours..."):
+            sample_processor = _make_processor(sample_file, cfg.frame_sample, cfg.entry_sample, cfg)
+            if not np.any(sample_processor.img):
+                raise ValueError(
+                    "The selected sample image is entirely zero. Check the entry/frame, and that "
+                    "the H5 file's linked raw data files are next to it."
+                )
+            q_sample, I_sample = sample_processor.integrate(plot=False)
+
+            I_ref = None
+            if ref_file is not None:
+                ref_processor = _make_processor(ref_file, cfg.frame_ref, cfg.entry_ref, cfg)
+                q_ref, I_ref_raw = ref_processor.integrate(plot=False)
+                I_ref = np.interp(q_sample, q_ref, I_ref_raw)
+
+            st.session_state["samplename"] = sample_processor.samplename
+            st.session_state["_pdf_q_sample"] = q_sample
+            st.session_state["_pdf_I_sample"] = I_sample
+            st.session_state["_pdf_I_ref"] = I_ref
+            st.session_state["_pdf_integration_key"] = key  # only on success
+        return True
+    except Exception as exc:
+        st.session_state["_pdf_integration_error"] = str(exc)
+        return False
 
 
 def render(cfg: H5Config) -> None:
@@ -50,34 +98,10 @@ def render(cfg: H5Config) -> None:
         st.warning("⚠️ Please select the sample H5 file and the PONI file in the Configuration tab.")
         return
 
-    # ========== INTEGRATION (cached: only re-run when the sample/ref/calibration change) ==========
-    integration_key = _integration_key(cfg, sample_file, ref_file)
-    if st.session_state.get("_pdf_integration_key") != integration_key:
-        st.session_state["_pdf_integration_key"] = integration_key
-        st.session_state["_pdf_integration_error"] = None
-        try:
-            with st.spinner("Intégration azimutale en cours..."):
-                sample_processor = _make_processor(sample_file, cfg.frame_sample, cfg.entry_sample, cfg)
-                if not np.any(sample_processor.img):
-                    raise ValueError(
-                        "The selected sample image is entirely zero. Check the entry/frame, and that "
-                        "the H5 file's linked raw data files are next to it."
-                    )
-                q_sample, I_sample = sample_processor.integrate(plot=False)
-
-                I_ref = None
-                if ref_file is not None:
-                    ref_processor = _make_processor(ref_file, cfg.frame_ref, cfg.entry_ref, cfg)
-                    q_ref, I_ref_raw = ref_processor.integrate(plot=False)
-                    I_ref = np.interp(q_sample, q_ref, I_ref_raw)
-
-                st.session_state["samplename"] = sample_processor.samplename
-                st.session_state["_pdf_q_sample"] = q_sample
-                st.session_state["_pdf_I_sample"] = I_sample
-                st.session_state["_pdf_I_ref"] = I_ref
-        except Exception as exc:
-            st.session_state["_pdf_integration_error"] = str(exc)
-            st.session_state["_pdf_q_sample"] = None
+    # Small status recap so you can see what the tab actually receives
+    st.caption(
+        f"Échantillon : `{sample_file}` · Référence : `{ref_file if ref_file is not None else '— aucune —'}`"
+    )
 
     # ========== INPUT PARAMETERS SECTION ==========
     st.markdown("## 📋 Input Parameters")
@@ -143,18 +167,18 @@ def render(cfg: H5Config) -> None:
                 key="r_peak_auto",
             )
             if st.button("🔄 Calculer bgscale optimal", key="btn_auto_bgscale_extract"):
-                q0 = st.session_state.get("_pdf_q_sample")
-                I0 = st.session_state.get("_pdf_I_sample")
-                Iref0 = st.session_state.get("_pdf_I_ref")
-                if ref_file is None or Iref0 is None:
-                    st.error("Fichiers échantillon et référence requis pour la détection automatique.")
-                elif q0 is None:
+                if ref_file is None:
+                    st.error("Un fichier de référence est requis pour la détection automatique.")
+                elif not _ensure_integration(cfg, sample_file, ref_file):
                     st.error(f"Intégration indisponible : {st.session_state.get('_pdf_integration_error')}")
                 else:
                     with st.spinner("Calcul du bgscale optimal..."):
                         try:
                             bg_opt, h_opt, r_found = auto_bgscale(
-                                q0, I0, Iref0, composition,
+                                st.session_state["_pdf_q_sample"],
+                                st.session_state["_pdf_I_sample"],
+                                st.session_state["_pdf_I_ref"],
+                                composition,
                                 qmin=qmin, qmax=qmax, qmaxinst=qmaxinst,
                                 rpoly=rpoly, Lorch=lorch, r_peak=r_peak_auto,
                             )
@@ -174,50 +198,95 @@ def render(cfg: H5Config) -> None:
         )
         st.session_state["bgscale"] = bgscale
 
+    # ========== COMPUTE BUTTON ==========
+    integration_key = _integration_key(cfg, sample_file, ref_file)
+    extraction_params = dict(
+        composition=composition, rmin=rmin, rmax=rmax, rstep=rstep,
+        qmin=qmin, qmax=qmax, qmaxinst=qmaxinst, rpoly=rpoly,
+        lorch=lorch, bgscale=bgscale,
+    )
+    params = {**extraction_params, "integration": integration_key}
+
+    col_btn, col_auto, col_force = st.columns([1, 1.5, 1.5])
+    with col_btn:
+        compute_clicked = st.button("🚀 Calculer la PDF", type="primary", key="btn_compute_pdf")
+    with col_auto:
+        auto_recompute_enabled = st.checkbox(
+            "Recalcul automatique (curseurs)", value=True, key="auto_recompute_pdf",
+            help="Recalcule la PDF dès qu'un paramètre d'extraction change, une fois le premier calcul effectué.",
+        )
+    with col_force:
+        force_reint = st.checkbox("Forcer la ré-intégration", value=False, key="force_reint")
+
+    # Auto-recompute: only after a first computation, only if the integration is still valid
+    # (same files/calibration), and only if an extraction parameter changed.
+    last_params = st.session_state.get("_pdf_last_params")
+    integration_ready = (
+        st.session_state.get("_pdf_integration_key") == integration_key
+        and st.session_state.get("_pdf_q_sample") is not None
+    )
+    params_changed = (
+        last_params is not None
+        and last_params.get("integration") == integration_key
+        and {k: v for k, v in last_params.items() if k != "integration"} != extraction_params
+    )
+    auto_triggered = auto_recompute_enabled and integration_ready and params_changed
+
+    if compute_clicked or auto_triggered:
+        st.session_state["_pdf_calc_error"] = None
+        if _ensure_integration(cfg, sample_file, ref_file, force=force_reint and compute_clicked):
+            try:
+                with st.spinner("Calcul de la PDF en cours..."):
+                    r, G = compute_xPDF(
+                        st.session_state["_pdf_q_sample"],
+                        st.session_state["_pdf_I_sample"],
+                        composition,
+                        Iref=st.session_state.get("_pdf_I_ref"),
+                        bgscale=bgscale,
+                        qmin=qmin,
+                        qmax=qmax,
+                        qmaxinst=qmaxinst,
+                        rmin=rmin,
+                        rmax=rmax,
+                        rstep=rstep,
+                        rpoly=rpoly,
+                        Lorch=lorch,
+                        plot=False,
+                    )
+
+                fig = go.Figure(
+                    layout=go.Layout(
+                        title=f"PDF - sample: {st.session_state['samplename']}",
+                        xaxis_title="r (Å)",
+                        yaxis_title="G(r)",
+                    )
+                )
+                fig.add_trace(
+                    go.Scatter(x=r, y=G, mode="lines", name="G(r)", line=dict(color="blue", width=2))
+                )
+                st.session_state["fig_gr"] = fig
+                st.session_state["res"] = {"frame": {"r": r, "G": G}}
+                st.session_state["_pdf_last_params"] = params
+            except Exception:
+                st.session_state["_pdf_calc_error"] = traceback.format_exc()
+
+    # ========== STATUS / ERRORS ==========
     if st.session_state.get("_pdf_integration_error"):
         st.error(f"❌ Error integrating data: {st.session_state['_pdf_integration_error']}")
-    elif st.session_state.get("_pdf_q_sample") is not None:
-        try:
-            with st.spinner("Calcul de la PDF en cours..."):
-                r, G = compute_xPDF(
-                    st.session_state["_pdf_q_sample"],
-                    st.session_state["_pdf_I_sample"],
-                    composition,
-                    Iref=st.session_state.get("_pdf_I_ref"),
-                    bgscale=bgscale,
-                    qmin=qmin,
-                    qmax=qmax,
-                    qmaxinst=qmaxinst,
-                    rmin=rmin,
-                    rmax=rmax,
-                    rstep=rstep,
-                    rpoly=rpoly,
-                    Lorch=True,
-                    plot=False,
-                )
+    if st.session_state.get("_pdf_calc_error"):
+        st.error("❌ Error extracting PDF")
+        with st.expander("Error details"):
+            st.code(st.session_state["_pdf_calc_error"])
 
-            fig = go.Figure(
-                layout=go.Layout(
-                    title=f"PDF - sample: {st.session_state['samplename']}",
-                    xaxis_title="r (Å)",
-                    yaxis_title="G(r)",
-                )
-            )
-            fig.add_trace(
-                go.Scatter(x=r, y=G, mode="lines", name="G(r)", line=dict(color="blue", width=2))
-            )
+    if st.session_state.get("_pdf_q_sample") is not None and ref_file is None:
+        st.info("ℹ️ Aucune référence sélectionnée : la PDF est calculée sans soustraction de fond.")
 
-            st.session_state["fig_gr"] = fig
-            st.session_state["res"] = {"frame": {"r": r, "G": G}}
-        except Exception as exc:
-            st.error(f"❌ Error extracting PDF: {exc}")
-            import traceback
-            with st.expander("Error details"):
-                st.code(traceback.format_exc())
-
+    # ========== DISPLAY ==========
     fig_gr_display = st.session_state.get("fig_gr")
     if fig_gr_display is not None:
-        st.plotly_chart(fig_gr_display, width='stretch')
+        if st.session_state.get("_pdf_last_params") != params:
+            st.warning("⚠️ Les paramètres ont changé depuis le dernier calcul : cliquez sur « Calculer la PDF ».")
+        st.plotly_chart(fig_gr_display, width="stretch")
         if st.button("🪟 Ouvrir dans une fenêtre séparée", key="open_window_gr"):
             samplename = st.session_state.get("samplename", "Unknown")
             open_fig_in_browser(
