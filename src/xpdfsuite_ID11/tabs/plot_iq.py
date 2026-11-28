@@ -74,6 +74,11 @@ def render(cfg: ExperimentConfig) -> None:
                         dark=dark, flat=flat, spline=spline,
                         polarization_factor=polarization, entry=entry_ref,
                     )
+                    # Ref = DERNIÈRE frame de l'entry (et non la première) ; remplacée par la moyenne
+                    # des bonnes refs si c'est une mauvaise ref
+                    last_ref_frame = ref_processor0.nb_frames_entry - 1
+                    ref_processor0.img = np.asarray(ref_processor0.data[last_ref_frame])
+                    replace_bad_reference_frames(ref_processor0, [last_ref_frame], get_ref_correction(cfg))
                     q0, I0 = sample_processor0.integrate()
                     q0ref, Iref0 = ref_processor0.integrate()
                     Iref0 = np.interp(q0, q0ref, Iref0)
