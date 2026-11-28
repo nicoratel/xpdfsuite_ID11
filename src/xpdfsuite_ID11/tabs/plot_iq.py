@@ -7,7 +7,7 @@ import numpy as np
 import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
-
+from pathlib import Path
 from xpdfsuite_ID11 import XRDProcessor
 from xpdfsuite_ID11.app_utilities import open_fig_in_browser
 from xpdfsuite_ID11.pdf_extraction import auto_bgscale
@@ -19,7 +19,7 @@ from xpdfsuite_ID11.utilities_process import (
 )
 
 from .configure import ExperimentConfig
-
+position_tol=0.05
 
 def render(cfg: ExperimentConfig) -> None:
     # --- Paramètres fournis par l'onglet « Configure Experiment » ---
@@ -37,14 +37,8 @@ def render(cfg: ExperimentConfig) -> None:
     frame_step = cfg.frame_step
     #nb_repeats = cfg.nb_repeats
     option = cfg.option
-    position_tol = cfg.position_tol
     position0 = cfg.position0
-    x_coude = cfg.x_coude
-    z_retour = cfg.z_retour
-    debit = cfg.debit
-    section = cfg.section
-    section_tri = cfg.section_tri
-    long_tri = cfg.long_tri
+    
 
     st.markdown("## 📈 Plot raw data")
 
@@ -270,14 +264,14 @@ def render(cfg: ExperimentConfig) -> None:
                             for motor, value in scanned.items()
                         }
 
-                        # Vecteur [y, z]
+                        # Vecteur [z, y] (moteur Z, moteur Y), voir docstring de convert_position_to_time
                         position_tuple = np.array([
                             next(
-                                (v for m, v in position.items() if "y" in m),
+                                (v for m, v in position.items() if "z" in m),
                                 0.0,
                             ),
                             next(
-                                (v for m, v in position.items() if "z" in m),
+                                (v for m, v in position.items() if "y" in m),
                                 0.0,
                             ),
                         ])
@@ -289,14 +283,7 @@ def render(cfg: ExperimentConfig) -> None:
 
                         time = convert_position_to_time(
                             position_tuple,
-                            position0=position0,
-                            x_coude=x_coude,
-                            z_retour=z_retour,
-                            debit=debit,
-                            section=section,
-                            long_tri=long_tri,
-                            section_tri=section_tri,
-                            tol=0.1,
+                            position0=position0                       
                         )
 
                         # -----------------------------------------------------
@@ -482,13 +469,36 @@ def render(cfg: ExperimentConfig) -> None:
                             entry=entry_sample,
                         )
 
+                        path_sf = Path(sample_file)
+
+                        # Extraction du préfixe du sample
+                        sample_name = path_sf.stem.split("_sf")[0]
+
+                        # Reconstruction du chemin
+                        filez2 = (
+                            path_sf.parent.parent
+                            / f"{sample_name}_scan_z2"
+                            / f"{sample_name}_scan_z2.h5"
+)
+
+                        processor_scanz2 = XRDProcessor(
+                            filez2,
+                            poni_file=poni_file,
+                            mask=mask_path,
+                            dark=dark,
+                            flat=flat,
+                            spline=spline,
+                            polarization_factor=polarization,
+                            entry=entry_sample,
+                        )
+
                         qsample, Isample = sample_processor.integrate()
 
                         # -----------------------------------------------------
                         # 4. Récupération du temps de réaction
                         # -----------------------------------------------------
                         reaction_time = compute_reaction_time_stop_flow(
-                            sample_processor
+                            sample_processor, processor_scanz2
                         )
 
                         

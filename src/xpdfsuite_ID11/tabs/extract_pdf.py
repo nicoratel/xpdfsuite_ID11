@@ -1,7 +1,7 @@
 """Onglet « Extract xPDF » : extraction des PDF G(r) pour chaque frame/groupe de frames."""
 
 from __future__ import annotations
-
+from pathlib import Path
 import json
 import numpy as np
 import streamlit as st
@@ -19,7 +19,7 @@ from xpdfsuite_ID11.utilities_process import (
 )
 
 from .configure import ExperimentConfig
-
+position_tol=0.05
 
 def render(cfg: ExperimentConfig) -> None:
     # --- Paramètres fournis par l'onglet « Configure Experiment » ---
@@ -37,21 +37,16 @@ def render(cfg: ExperimentConfig) -> None:
     frame_step = cfg.frame_step
     #nb_repeats = cfg.nb_repeats
     option = cfg.option
-    position_tol = cfg.position_tol
+    
     position0 = cfg.position0
-    x_coude = cfg.x_coude
-    z_retour = cfg.z_retour
-    debit = cfg.debit
-    section = cfg.section
-    section_tri = cfg.section_tri
-    long_tri = cfg.long_tri
+    
 
     st.markdown("## 🧮 Extract PDF")
     # ========== DEFAULT VALUES ==========
     _default_bgscale = st.session_state.get("bgscale", 1.0)
     _default_qmin = 0.5
-    _default_qmax = 24.5
-    _default_qmaxinst = 24.5
+    _default_qmax = 20.0
+    _default_qmaxinst = 20.0
     _default_rpoly = 0.9
     _default_lorch = True
     _default_composition = "Au"
@@ -380,14 +375,14 @@ def render(cfg: ExperimentConfig) -> None:
                         for motor, value in scanned.items()
                     }
 
-                    # Vecteur [y, z]
+                    # Vecteur [z, y] (moteur Z, moteur Y), voir docstring de convert_position_to_time
                     position_tuple = np.array([
                         next(
-                            (v for m, v in position.items() if "y" in m),
+                            (v for m, v in position.items() if "z" in m),
                             0.0,
                         ),
                         next(
-                            (v for m, v in position.items() if "z" in m),
+                            (v for m, v in position.items() if "y" in m),
                             0.0,
                         ),
                     ])
@@ -400,13 +395,7 @@ def render(cfg: ExperimentConfig) -> None:
                     time = convert_position_to_time(
                         position_tuple,
                         position0=position0,
-                        x_coude=x_coude,
-                        z_retour=z_retour,
-                        debit=debit,
-                        section=section,
-                        long_tri=long_tri,
-                        section_tri=section_tri,
-                        tol=0.1,
+                        
                     )
 
                     # -----------------------------------------------------
@@ -640,6 +629,20 @@ def render(cfg: ExperimentConfig) -> None:
                         entry=entry_sample,
                     )
 
+                    path_sf = Path(sample_file)
+
+                    # Extraction du préfixe du sample
+                    sample_name = path_sf.stem.split("_sf")[0]
+
+                    # Reconstruction du chemin
+                    filez2 = (
+                        path_sf.parent.parent
+                        / f"{sample_name}_scan_z2"
+                        / f"{sample_name}_scan_z2.h5"
+)
+                    processor_scanz2 = XRDProcessor(filez2, frame=0, poni_file=poni_file,
+                                            mask=mask_path, polarization_factor=polarization, entry=entry_sample)
+
                     # -----------------------------------------------------
                     # 5. Chargement de la référence correspondante
                     # -----------------------------------------------------
@@ -673,7 +676,7 @@ def render(cfg: ExperimentConfig) -> None:
                     # 6. Calcul des temps de réaction
                     # -----------------------------------------------------
                     reaction_time = compute_reaction_time_stop_flow(
-                        sample_processor
+                        sample_processor, processor_scanz2
                     )
 
                     # Temps associé au groupe : celui de sa première frame

@@ -27,16 +27,9 @@ class ExperimentConfig:
     entry_ref: int | None
     frame_binning: int
     frame_step: int | None
-    
     option: str
-    position_tol: float
     position0: tuple | None
-    x_coude: float | None
-    z_retour: float | None
-    debit: float | None
-    section: float | None
-    section_tri: float | None
-    long_tri: float | None
+    
 
 
 def render() -> ExperimentConfig:
@@ -181,7 +174,7 @@ def render() -> ExperimentConfig:
 
         entry_sample = st.number_input(
                     "Valeur d'entrée dans le fichiers de données de l'échantillon",
-                    value=None,
+                    value=0,
                     min_value=0,
                     step=1,
                     help="For h5 files, the entry number corresponds to the dataset index (starting from 0). For EDF files, the entry number is always 0.",
@@ -202,14 +195,14 @@ def render() -> ExperimentConfig:
 
         entry_ref = st.number_input(
                     "Valeur d'entrée dans le fichier de données de référence",
-                    value=None,
+                    value=0,
                     min_value=0,
                     step=1,
                     help="For h5 files, the entry number corresponds to the dataset index (starting from 0). For EDF files, the entry number is always 0.",
                 )
 
     # Géométrie de la cellule : renseignée seulement pour l'expérience lost_flow
-    position0 = x_coude = z_retour = debit = section = section_tri = long_tri = None
+    position0 = volume_coude = z_retour = debit = section = section_tri = volume_tri = None
 
     if option == "lost_flow":
         st.markdown("### ⚡ Geometrie de la cellule µfluidique")
@@ -217,55 +210,19 @@ def render() -> ExperimentConfig:
         col_lost_flow1, col_lost_flow2 = st.columns(2)
 
         with col_lost_flow1:
-            # position0 tuple for the lost flow experiment
-            
-            position0 = st.text_input("Coordonnées de la position 0 après le mixer (format: X, Y)",
-        value="0, 0",
-        help="Entrez les coordonnées de la position 0 après le mixer, séparées par une virgule.")
+            # position0 tuple for the lost flow experiment (moteur Z, moteur Y)
+
+            position0 = st.text_input("Coordonnées de la position 0 après le mixer (format: Z, Y)",
+        value="-8.42, -21.29",
+        help="Entrez les coordonnées (moteur Z, moteur Y) de la position 0 après le mixer, séparées par une virgule.")
 
             # Conversion de la chaîne "1, 2" en tuple (1, 2)
             try:
-                position0 = tuple(int(x.strip()) for x in position0.split(","))
+                position0 = tuple(float(x.strip()) for x in position0.split(","))
             except ValueError:
                 st.error("Veuillez entrer deux nombres valides séparés par une virgule.")
 
-            x_coude = st.number_input(
-                "Longueur du premier canal horizontal de la cellule en mm.",
-                value=31.0,
-                step=0.1,
-                help="Longueur du premier canal horizontal de la cellule en mm.")
-
-            z_retour = st.number_input(
-                        "Gap vertical entre les 2 canaux de la cellule en mm.",
-                        value=1.0,
-                        step=0.1,
-                        help="Gap vertical entre les 2 canaux de la cellule en mm.")
-
-            debit = st.number_input(
-                        "Débit du flux en µL/sec.",
-                        value=8.0,
-                        step=0.01,
-                        help="Débit du flux en µL/sec.")
-     
-        with col_lost_flow2:
-
-            section = st.number_input(
-                        "Section de la cellule en mm².",
-                        value=2.0,
-                        step=0.1,
-                        help="Section de la cellule en mm².")
-
-            section_tri = st.number_input(
-                        "Section de la partie triangulaire de la cellule en mm².",
-                        value=0.5*np.sqrt(5),
-                        step=0.1,
-                        help="Section de la partie triangulaire de la cellule en mm².")
-
-            long_tri = st.number_input(
-                        "longueur de la section triangulaire",
-                        value=0.0,
-                        step=0.1,
-                        help="Longueur de la section triangulaire de la cellule en mm.")
+            
 
     return ExperimentConfig(
         sample_file=sample_file,
@@ -281,12 +238,7 @@ def render() -> ExperimentConfig:
         frame_binning=frame_binning,
         frame_step=frame_step,
         option=option,
-        position_tol=position_tol,
+        
         position0=position0,
-        x_coude=x_coude,
-        z_retour=z_retour,
-        debit=debit,
-        section=section,
-        section_tri=section_tri,
-        long_tri=long_tri,
+        
     )
