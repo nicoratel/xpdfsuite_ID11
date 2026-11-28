@@ -2,6 +2,7 @@ from matplotlib import pyplot as plt
 from xpdfsuite_ID11 import extract_xpdf,XRDProcessor,ID11Data
 import os
 import numpy as np
+import fabio
 from scipy.spatial import cKDTree
 from xpdfsuite_ID11.peakfit import fit_peak_pseudovoigt
 from pathlib import Path
@@ -169,6 +170,126 @@ def match_frames_by_motor_positions(file, ref_file, motor_names=('difftz', 'samt
 
 
 
+def _frame_mean_intensities(dataset, mask=None):
+    """Intensité moyenne (pixels non masqués) de chaque frame d'un dataset (N, H, W)."""
+    valid = ~mask if mask is not None else None
+    out = np.empty(dataset.shape[0], dtype=float)
+    for i in range(dataset.shape[0]):
+        img = np.asarray(dataset[i], dtype=np.float64)
+        out[i] = img[valid].mean() if valid is not None else img.mean()
+    return out
+
+
+def detect_bad_references(intensities, factor=0.8):
+    """
+    Classe les frames de référence en bonnes / mauvaises (mauvaise ref = intensité plus faible).
+
+    Le niveau "bonne ref" est la médiane des intensités (robuste tant que les mauvaises refs
+    sont minoritaires), recalculée une seconde fois après exclusion des mauvaises refs
+    détectées. Une ref est mauvaise si son intensité < factor * niveau_bonne_ref.
+
+    Returns
+    -------
+    bad : ndarray of bool, True pour les mauvaises refs
+    ref_level : float, intensité moyenne d'une bonne ref
+    """
+    intensities = np.asarray(intensities, dtype=float)
+    level = np.median(intensities)
+    bad = intensities < factor * level
+    if bad.any() and (~bad).any():
+        level = np.median(intensities[~bad])
+        bad = intensities < factor * level
+    ref_level = float(intensities[~bad].mean())
+    return bad, ref_level
+
+
+def prepare_bad_reference_correction(ref_file, entry_ref=None, mask_file=None, factor=0.8):
+    """
+    Détecte les mauvaises références (bulle d'air) de `ref_file` et calcule l'image moyenne
+    des bonnes références, qui servira à les remplacer.
+
+    Returns
+    -------
+    None si l'entry est 'mean' (non géré), sinon un dict :
+        'bad'           : set des indices (dans l'entry) de frames de ref mauvaises
+        'good_mean_img' : image moyenne des bonnes refs (None s'il n'y a pas de mauvaise ref)
+        'intensities'   : intensité moyenne de chaque frame de ref
+        'ref_level'     : intensité moyenne d'une bonne ref
+        'factor'        : seuil utilisé
+    """
+    if isinstance(entry_ref, str) and entry_ref == 'mean':
+        print("Warning: détection des mauvaises refs non gérée pour entry_ref='mean' (ignorée).")
+        return None
+
+    mask = fabio.open(mask_file).data.astype(bool) if mask_file is not None else None
+    ref_data = ID11Data(ref_file)
+    try:
+        entry_name = _resolve_entry_name(ref_data, entry_ref) or ref_data.entries[0]
+        dataset = ref_data.data[entry_name]
+        intensities = _frame_mean_intensities(dataset, mask)
+        bad, ref_level = detect_bad_references(intensities, factor)
+
+        good_mean_img = None
+        if bad.any():
+            good_idx = np.flatnonzero(~bad)
+            acc = np.zeros(dataset.shape[1:], dtype=np.float64)
+            for i in good_idx:
+                acc += np.asarray(dataset[i], dtype=np.float64)
+            good_mean_img = acc / len(good_idx)
+    finally:
+        ref_data.close()
+
+    return {'bad': set(np.flatnonzero(bad).tolist()),
+            'good_mean_img': good_mean_img,
+            'intensities': intensities,
+            'ref_level': ref_level,
+            'factor': factor,
+            'entry': entry_name}
+
+
+def replace_bad_reference_frames(ref_processor, frame_group_ref, correction):
+    """
+    Remplace, dans `ref_processor.img`, les frames de ref mauvaises (bulle d'air) du groupe
+    `frame_group_ref` par l'image moyenne des bonnes refs. À appeler juste après la création
+    du `XRDProcessor` de la ref et avant `integrate()` / `extract_xpdf()`.
+
+    Returns
+    -------
+    list : indices de frames de ref remplacées (liste vide si aucune).
+    """
+    if correction is None or not correction['bad']:
+        return []
+    replaced = [f for f in frame_group_ref if f in correction['bad']]
+    if not replaced:
+        return []
+    imgs = [correction['good_mean_img'] if f in correction['bad']
+            else np.asarray(ref_processor.data[f], dtype=np.float64)
+            for f in frame_group_ref]
+    ref_processor.img = np.mean(imgs, axis=0)
+    return replaced
+
+
+def print_bad_reference_report(correction, ref_frame_map=None):
+    """Résumé en sortie standard du tri bonnes / mauvaises références."""
+    intensities = correction['intensities']
+    bad = sorted(correction['bad'])
+    ref_level = correction['ref_level']
+    n = len(intensities)
+    print(f"[Refs] entry {correction['entry']} : {n} frames, intensité moyenne d'une bonne ref = {ref_level:.4g}, "
+          f"seuil = {correction['factor']:.2f} x ({correction['factor'] * ref_level:.4g}).")
+    if not bad:
+        print("[Refs] Aucune mauvaise référence détectée.")
+        return
+    print(f"[Refs] {len(bad)}/{n} mauvaises refs (frames {bad}) -> remplacées par la moyenne de {n - len(bad)} bonnes refs.")
+    for i in bad:
+        line = f"[Refs]   ref frame {i}: intensité {intensities[i]:.4g} (x{intensities[i] / ref_level:.2f})"
+        if ref_frame_map is not None:
+            affected = sorted(sf for sf, rf in ref_frame_map.items() if rf == i)
+            if affected:
+                line += f", utilisée par les frames sample {affected}"
+        print(line)
+
+
 def process_lost_flow(file,
                       ref_file=None,
                       poni_file=None,
@@ -190,7 +311,8 @@ def process_lost_flow(file,
                       entry_ref=None,
                       #motor_names=('difftz', 'samty', 'samtz'),
                       motor_names=('difftz', 'samty'),
-                      position_tol=0.05):
+                      position_tol=0.05,
+                      bad_ref_factor=0.8):
     """
     Process a series of images from a lost-flow experiment, extracting the PDF for each frame.
     
@@ -237,6 +359,11 @@ def process_lost_flow(file,
     position_tol : float
         Tolérance (mm) sur chaque moteur pour considérer deux positions comme identiques
         lors de l'appariement sample/ref (défaut 0.05 mm = 50 µm).
+    bad_ref_factor : float or None
+        Une frame de ref est jugée mauvaise si son intensité moyenne est inférieure à
+        `bad_ref_factor` x l'intensité d'une bonne ref (médiane). Les mauvaises refs sont
+        remplacées par l'image moyenne des bonnes refs. None désactive la correction.
+        Défaut 0.8.
 
     Returns
     -------
@@ -270,6 +397,14 @@ def process_lost_flow(file,
             missing = [u['sample_frame'] for u in unmatched]
             print(f"Warning: no reference frame found within position_tol={position_tol} mm for sample frames "
                   f"{missing}; falling back to the same frame index in ref_file for those.")
+
+    # Tri bonnes / mauvaises refs (bulle d'air) et image moyenne des bonnes refs
+    ref_correction = None
+    if ref_file is not None and bad_ref_factor is not None:
+        ref_correction = prepare_bad_reference_correction(
+            ref_file, entry_ref=entry_ref, mask_file=mask_file, factor=bad_ref_factor)
+        if ref_correction is not None:
+            print_bad_reference_report(ref_correction, ref_frame_map)
 
     # Paramètres (à ajouter à la signature de la fonction)
     # frame_binning : nb de frames consécutives moyennées dans une série
@@ -323,6 +458,10 @@ def process_lost_flow(file,
             frame_group_ref = [ref_frame_map.get(f, f) for f in frame_group]
             frame_arg_ref = frame_group_ref[0] if len(frame_group_ref) == 1 else frame_group_ref
             ref_processor = XRDProcessor(ref_file, frame=frame_arg_ref, poni_file=poni_file, mask=mask_file, polarization_factor=polarization, entry=entry_ref)
+            # Remplacement des mauvaises refs du groupe par l'image moyenne des bonnes refs
+            replaced = replace_bad_reference_frames(ref_processor, frame_group_ref, ref_correction)
+            if replaced:
+                print(f"  -> ref frame(s) {replaced} mauvaise(s) remplacée(s) par la ref moyenne.")
         else:
             ref_processor = None
 
@@ -443,7 +582,7 @@ def monitor_pdf_peaks_lost_flow(file,
                       peak_positions=[2.3,2.9],
                       fit_window=0.4,
                       plot=True,
-                      position0=[0,0], x_coude=31, volume_coude=None, z_retour=1, debit=8.0,section=2.0, long_tri=0.0, volume_tri=None, section_tri=0.5*5**(1/2), tol=1e-1):
+                      position0=[0,0], x_coude=31, volume_coude=None, z_retour=1, debit=8.0,section=2.0, long_tri=0.0, volume_tri=None, section_tri=0.5*5**(1/2), tol=1e-1, bad_ref_factor=0.8):
 
     """
     Monitor the evolution of specific PDF peaks over a series of images from a lost-flow experiment.
@@ -518,6 +657,7 @@ def monitor_pdf_peaks_lost_flow(file,
                                        entry_sample=entry_sample,
                                        entry_ref=entry_ref,
                                        plot=False,
+                                       bad_ref_factor=bad_ref_factor,
                                        )
 
     scanned_motors = res[list(res.keys())[0]]['position']  # Assuming all frame groups have the same scanned motors
