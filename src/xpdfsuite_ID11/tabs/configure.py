@@ -29,7 +29,7 @@ class ExperimentConfig:
     frame_step: int | None
     option: str
     position0: tuple | None
-    
+    bad_ref_factor: float | None = None  # None = filtrage des mauvaises refs désactivé
 
 
 def render() -> ExperimentConfig:
@@ -203,6 +203,7 @@ def render() -> ExperimentConfig:
 
     # Géométrie de la cellule : renseignée seulement pour l'expérience lost_flow
     position0 = volume_coude = z_retour = debit = section = section_tri = volume_tri = None
+    bad_ref_factor = None
 
     if option == "lost_flow":
         st.markdown("### ⚡ Geometrie de la cellule µfluidique")
@@ -222,6 +223,19 @@ def render() -> ExperimentConfig:
             except ValueError:
                 st.error("Veuillez entrer deux nombres valides séparés par une virgule.")
 
+        with col_lost_flow2:
+            filter_bad_refs = st.checkbox(
+                "Filtrer les mauvaises références",
+                value=True,
+                help="Les frames de référence nettement moins intenses que la médiane sont remplacées "
+                     "par la moyenne des bonnes références (lost_flow uniquement).")
+            if filter_bad_refs:
+                bad_ref_factor = st.number_input(
+                    "Seuil d'intensité d'une mauvaise référence (x bonne réf.)",
+                    value=0.80, min_value=0.01, max_value=0.99, step=0.01, format="%.2f",
+                    help="Une ref est mauvaise si son intensité moyenne est inférieure à ce facteur x l'intensité "
+                         "d'une bonne ref (0.8 par défaut).")
+
             
 
     return ExperimentConfig(
@@ -240,5 +254,5 @@ def render() -> ExperimentConfig:
         option=option,
         
         position0=position0,
-        
+        bad_ref_factor=bad_ref_factor,
     )

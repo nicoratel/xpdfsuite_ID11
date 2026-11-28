@@ -16,9 +16,11 @@ from xpdfsuite_ID11.utilities_process import (
     convert_position_to_time,
     extract_number_of_images,
     match_frames_by_motor_positions,
+    replace_bad_reference_frames,
 )
 
 from .configure import ExperimentConfig
+from .ref_filter import get_ref_correction, render_report
 position_tol=0.05
 
 def render(cfg: ExperimentConfig) -> None:
@@ -195,6 +197,10 @@ def render(cfg: ExperimentConfig) -> None:
                             f"utilisé en secours pour celles-ci."
                         )
 
+                # Tri bonnes / mauvaises références (bulle d'air), lost_flow uniquement
+                ref_correction = get_ref_correction(cfg)
+                render_report(ref_correction, ref_frame_map)
+
                 # ---------------------------------------------------------
                 # 2. Définition du pas et calcul du nombre de groupes
                 # ---------------------------------------------------------
@@ -335,6 +341,8 @@ def render(cfg: ExperimentConfig) -> None:
                             polarization_factor=polarization,
                             entry=entry_ref,
                         )
+                        replace_bad_reference_frames(
+                            ref_processor, frame_group_ref, ref_correction)
                     else:
                         ref_processor = None
 
