@@ -69,6 +69,8 @@ def render(cfg: ExperimentConfig) -> None:
         rmin = st.number_input("rmin (Å)", value=0.0, step=0.1)
         rmax = st.number_input("rmax (Å)", value=50.0, step=0.1)
         rstep = st.number_input("rstep (Å)", value=0.01, step=0.001)
+
+ 
     
     with col_out2:
         st.markdown("**Gamme de Q utilisée pour l'extraction**")
@@ -264,21 +266,7 @@ def render(cfg: ExperimentConfig) -> None:
 
                 st.session_state["samplename"] = sample_processor.samplename
 
-                fig = go.Figure(
-                    layout=go.Layout(
-                        title=f"Lost flow - sample: {sample_processor.samplename}",
-                        xaxis_title="r (Å)",
-                        yaxis_title="G(r)",
-                    )
-                )
-
-                palette = px.colors.sample_colorscale(
-                    "Bluered",
-                    [i / max(nb_bins - 1, 1) for i in range(nb_bins)],
-                )
-
-                n = 0
-
+                
                 progress_bar_gr_lostflow = st.progress(
                     0,
                     text="Calcul de la PDF en cours...",
@@ -289,7 +277,7 @@ def render(cfg: ExperimentConfig) -> None:
                 # ---------------------------------------------------------
                 for bin_idx in range(nb_bins):
 
-                    couleur_courbe = palette[bin_idx % len(palette)]
+                    #couleur_courbe = palette[bin_idx % len(palette)]
 
                     # Début du groupe courant
                     base = bin_idx * frame_step_eff
@@ -426,21 +414,7 @@ def render(cfg: ExperimentConfig) -> None:
                     # -----------------------------------------------------
                     # 8. Tracé de G(r) décalé en fonction du temps
                     # -----------------------------------------------------
-                    fig.add_trace(
-                        go.Scatter(
-                            x=r,
-                            y=G / G.max() + n,
-                            mode="lines",
-                            name=f"time={time:.2f}s",
-                            line=dict(
-                                color=couleur_courbe,
-                                width=2,
-                            ),
-                        )
-                    )
-
-                    n += 0.02
-
+                    
                     progress_bar_gr_lostflow.progress(
                         (bin_idx + 1) / nb_bins,
                         text=f"Calcul de la PDF {bin_idx + 1}/{nb_bins}",
@@ -451,7 +425,7 @@ def render(cfg: ExperimentConfig) -> None:
                 # ---------------------------------------------------------
                 progress_bar_gr_lostflow.empty()
 
-                st.session_state["fig_gr"] = fig
+                #st.session_state["fig_gr"] = fig
                 st.session_state["res"] = res
 
 
@@ -574,21 +548,7 @@ def render(cfg: ExperimentConfig) -> None:
 
                 st.session_state["samplename"] = sample_processor.samplename
 
-                fig = go.Figure(
-                    layout=go.Layout(
-                        title=f"Stop flow - sample {sample_processor.samplename}",
-                        xaxis_title="r (Å)",
-                        yaxis_title="G(r)",
-                    )
-                )
-
-                palette = px.colors.sample_colorscale(
-                    "Bluered",
-                    [i / max(nb_bins - 1, 1) for i in range(nb_bins)],
-                )
-
-                n = 0
-
+                
                 progress_bar_gr_stopflow = st.progress(
                     0, text="Calcul du PDF en cours..."
                 )
@@ -598,8 +558,7 @@ def render(cfg: ExperimentConfig) -> None:
                 # ---------------------------------------------------------
                 for bin_idx in range(nb_bins):
 
-                    couleur_courbe = palette[bin_idx % len(palette)]
-
+                    
                     # Début du groupe courant
                     base = bin_idx * frame_step_eff
 
@@ -725,24 +684,7 @@ def render(cfg: ExperimentConfig) -> None:
                     # -----------------------------------------------------
                     # 8. Tracé de G(r)
                     # -----------------------------------------------------
-                    fig.add_trace(
-                        go.Scatter(
-                            x=r,
-                            y=G / G.max() + n,
-                            mode="lines",
-                            name=(
-                                f"time={time:.2f}s"
-                                if time is not None
-                                else f"frames={frame_group}"
-                            ),
-                            line=dict(
-                                color=couleur_courbe,
-                                width=2,
-                            ),
-                        )
-                    )
-
-                    n += 0.02
+                    
 
                     progress_bar_gr_stopflow.progress(
                         (bin_idx + 1) / nb_bins,
@@ -754,29 +696,94 @@ def render(cfg: ExperimentConfig) -> None:
                 # ---------------------------------------------------------
                 progress_bar_gr_stopflow.empty()
 
-                st.session_state["fig_gr"] = fig
+                #st.session_state["fig_gr"] = fig
                 st.session_state["res"] = res
 
 
-    fig_gr_display = st.session_state.get("fig_gr")
-    if fig_gr_display is not None:
-        st.plotly_chart(fig_gr_display, use_container_width=True)
-        if st.button("🪟 Ouvrir dans une fenêtre séparée", key="open_window_gr"):
-            
-            html = fig_gr_display.to_html(
-                full_html=True,
-                include_plotlyjs=True, 
-                config={"responsive": True},
-            )
-            # Injection du titre de l'onglet
-            fig_title = f"G(r):{st.session_state.get('samplename', 'Unknown')} {st.session_state.get('iq_raw_data')['option']} "
-            open_fig_in_browser(fig_gr_display, tab_title=fig_title, filename=f"PDFs_{st.session_state.get('samplename', 'Unknown')}.html")
+    # =========================================================
+    # Reconstruction de la figure à partir des données stockées
+    # =========================================================
 
-    json_res = json.dumps(st.session_state.get("res"), indent=4, default=lambda o: o.tolist() if hasattr(o, "tolist") else str(o),)
-    st.download_button(
-        label="Download PDF data as JSON",
-        data=json_res,
-            file_name=f"pdf_data_sample_{st.session_state.get('samplename')}.json",
-            mime="application/json",
-        key="download_pdf_data"
-    )
+    res = st.session_state.get("res")
+
+    if res:
+
+        # Option d'affichage
+        apply_offset = st.checkbox(
+            "Apply offset",
+            value=True,
+            key="apply_offset",
+            help="Apply a vertical offset between successive PDF curves."
+        )
+
+        fig_gr_display = go.Figure()
+
+        # Palette de couleurs
+        nb_curves = len(res)
+
+        palette = px.colors.sample_colorscale(
+            "Bluered",
+            [i / max(nb_curves - 1, 1) for i in range(nb_curves)],
+        )
+
+        # Titre
+        option = cfg.option
+        sample_name = st.session_state.get("samplename", "Unknown")
+
+        fig_gr_display.update_layout(
+            title=f"{option.replace('_', ' ').title()} - sample: {sample_name}",
+            xaxis_title="r (Å)",
+            yaxis_title="G(r)",
+        )
+
+        n = 0
+
+        # Reconstruction des courbes
+        for i, (frame_key, data) in enumerate(res.items()):
+
+            r = data["r"]
+            G = data["G"]
+            time = data["time"]
+
+            # Nom de la courbe
+            if time is not None:
+                curve_name = f"time={time:.2f}s"
+            else:
+                curve_name = f"frames={frame_key}"
+
+            # Tracé
+            fig_gr_display.add_trace(
+                go.Scatter(
+                    x=r,
+                    y=G / G.max() + (n if apply_offset else 0),
+                    mode="lines",
+                    name=curve_name,
+                    line=dict(
+                        color=palette[i],
+                        width=2,
+                    ),
+                )
+            )
+
+            if apply_offset:
+                n += 0.02
+
+        # Affichage dans Streamlit
+        st.plotly_chart(
+            fig_gr_display,
+            use_container_width=True
+        )
+
+        # Ouverture dans une fenêtre séparée
+        if st.button("🪟 Ouvrir dans une fenêtre séparée", key="open_window_gr"):
+
+            fig_title = (
+                f"G(r):{sample_name} "
+                f"{option}"
+            )
+
+            open_fig_in_browser(
+                fig_gr_display,
+                tab_title=fig_title,
+                filename=f"PDFs_{sample_name}.html"
+            )
