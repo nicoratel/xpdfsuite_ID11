@@ -4,6 +4,7 @@ import os
 import numpy as np
 from scipy.spatial import cKDTree
 from xpdfsuite_ID11.peakfit import fit_peak_pseudovoigt
+from pathlib import Path
 
 
 def extract_number_of_images(file,entry,poni_file):
@@ -81,8 +82,8 @@ def _get_motor_position_table(data, motor_names):
     return positions, frame_info
 
 
-def match_frames_by_motor_positions(file, ref_file, motor_names=('difftz', 'samty', 'samtz'), tol=0.05,
-                                     entry_sample=None, entry_ref=None):
+def match_frames_by_motor_positions(file, ref_file, motor_names=('difftz', 'samty'), tol=0.05,
+                                     entry_sample=0, entry_ref=0):
     """
     Apparie les frames du fichier échantillon `file` avec celles du fichier de référence
     `ref_file` en comparant les positions des moteurs `motor_names` lues dans les
@@ -187,7 +188,8 @@ def process_lost_flow(file,
                       frame_binning=1,
                       entry_sample=None,
                       entry_ref=None,
-                      motor_names=('difftz', 'samty'),#, 'samtz'),
+                      #motor_names=('difftz', 'samty', 'samtz'),
+                      motor_names=('difftz', 'samty'),
                       position_tol=0.05):
     """
     Process a series of images from a lost-flow experiment, extracting the PDF for each frame.
@@ -331,8 +333,15 @@ def process_lost_flow(file,
             frame_str = f"{frame_group[0]}-{frame_group[-1]}"
         outputfile = f'{os.path.dirname(file)}/{os.path.basename(file).split(".")[0]}_frames={frame_str}.gr'
         position ={}
-        for motor, value in sample_processor.scanned_motors.items():            
-            position[motor] = value[bin_idx] if frame_binning == 1 else value[frame_group][0] #assuming the motor position is constant over the binned frames, we take the first value
+        position = {}
+
+        # Moteur scanné : une position par frame
+        position['difftz'] = sample_processor.scanned_motors['difftz'][bin_idx]
+
+        # Moteur fixe : position constante pour l'entry
+        position['samty'] = sample_processor.positions['positioners']['samty']
+
+        res[str(frame_group)]['position'] = position
 
         res[str(frame_group)]['position'] = position
         
@@ -361,41 +370,56 @@ def process_lost_flow(file,
         plt.legend()
     return pdf_files, res
 
-def convert_position_to_time(position, position0=[0,0], x_coude=31, z_retour=1, debit=8.0,
-                   section=2.0, long_tri=0.0, section_tri=0.5*5**(1/2), tol=1e-1):
+def convert_position_to_time(position, position0=[-8.42,-21.29], tol=3, debit=10, thickness = 1.01, largeur_canal = 2, canal_length=30, volume_coude=9.96, volume_triangle=2):
     """
     Convertit la position dans la puce en temps de réaction.
     Temps de réaction (s) au point `position`, depuis la fin du mélangeur.
 
     t= volume/debit, avec volume cumulé depuis la fin du mélangeur jusqu'à la position `position`.
     l'utilisation du volume plutot que de la surface permet de prendre en compte les variations de section du canal.
-
+    La cellule est dans le plan (y,z), et les canaux sont placés verticalement. Chaque canal correspond donc à une valeur de y quasi stationnaire, ajusté par le paramètre tol
+   
+    Parameters
+    ----------  
     position, position0 : (x, z) en mm (position0 = fin du mélangeur)
-    x_coude  : x du palier vertical (mm)
-    z_retour : offset en z entre les 2 paliers (mm)
-    debit    : débit total en µL/s (défaut 8)
-    section  : section du canal en mm² (défaut 2 x 2 mm)
-    long_tri, section_tri : zone triangulaire au début (ignorée si long_tri=0, section triangle équilatéral de 2mm de côté par défaut)
-    tol      : tolérance (mm) pour décider sur quel palier on se trouve
+    thickness : épaisseur du canal (mm)
+    largeur_canal : largeur du canal (mm)
+    canal_length : longueur du canal (mm)    
+    volume_coude : volume du coude (µL)
+    debit: débit en µL/s
     """
-    x, z = position
-    x0, z0 = position0
+    print("position reçue :", position)
+    z, y = position # z et y sont inversés par rapport à la convention de la puce (y vertical, z horizontal)
+    print(f"y = {y}, z = {z}")
+    #y,z = position
+    y0,z0 = position0
+
+    delta_y = np.abs(y-y0) # permet de savoir si on est dans le canal primaire ou secondaire
     
+    
+    if delta_y < tol:
+        delta_z = np.abs(z-z0)    
+        # canal primaire
+        if delta_z < 2:
+            # section triangulaire
+            alpha = np.arctan(1/2) # angle sommet triangle
+            volume = 1.01*delta_z*0.5*delta_z*np.tan(alpha) # volume du triangle (mm^3)
+        else:
+            # canal primaire, après le triangle le mélangeur
+            volume = volume_triangle + (delta_z-2)*thickness*largeur_canal # volume du triangle + volume du coude + volume du canal primaire (mm^3)
+            
+        
+    else:
+        # canal secondaire
+        z0_new = z0 + canal_length # on se place à l'entrée du coude # faux -> le z0 doit correspondra au 1er point du scan
+        print('z0 modified to', z0_new, 'z=', z)
+        delta_z = np.abs(z-z0_new)
+        print('delta_z = ', delta_z)
+        volume_deja_parcouru = volume_triangle + thickness*largeur_canal*(canal_length+2*2) + volume_coude 
+        volume = volume_deja_parcouru + delta_z*largeur_canal*thickness# volume du triangle + volume du coude + volume du canal secondaire (mm^3)
+        print('Volume du canal primaire = ', volume_deja_parcouru, 'mm^3')
+        print('VOlume parcouru depuis le début', volume, 'mm^3')
 
-    L1 = abs(x_coude - x0)      # 1er palier horizontal
-    L2 = abs(z_retour)     # palier vertical
-
-    if abs(z - (z0 + z_retour)) < tol:          # 3e palier : on revient en sens inverse
-        d = L1 + L2 + abs(x - x_coude)
-    elif abs(x - x_coude) < tol:         # 2e palier (vertical)
-        d = L1 + abs(z - z0)
-    else:                                # 1er palier
-        d = abs(x - x0)
-
-    # volume cumulé (1 µL = 1 mm³) : zone triangulaire puis zone carrée
-    d_tri = min(d, long_tri)
-    volume = d_tri * section_tri + (d - d_tri) * section
-    #print(f"Position:{position}, time={volume/debit:.2f}s, volume={volume:.2f}mm³, debit={debit:.2f}µL/s")
     return volume / debit
 
 def monitor_pdf_peaks_lost_flow(file,
@@ -419,7 +443,7 @@ def monitor_pdf_peaks_lost_flow(file,
                       peak_positions=[2.3,2.9],
                       fit_window=0.4,
                       plot=True,
-                      position0=[0,0], x_coude=31, z_retour=1, debit=8.0,section=2.0, long_tri=0.0, section_tri=0.5*5**(1/2), tol=1e-1):
+                      position0=[0,0], x_coude=31, volume_coude=None, z_retour=1, debit=8.0,section=2.0, long_tri=0.0, volume_tri=None, section_tri=0.5*5**(1/2), tol=1e-1):
 
     """
     Monitor the evolution of specific PDF peaks over a series of images from a lost-flow experiment.
@@ -498,23 +522,45 @@ def monitor_pdf_peaks_lost_flow(file,
 
     scanned_motors = res[list(res.keys())[0]]['position']  # Assuming all frame groups have the same scanned motors
     print(f"Scanned motors: {scanned_motors}")
-    # il va falloir relier les positions (x,z) au temps de réaction, d'une façon ou d'une autre...
-    # convert_position_to_time() est une fonction qui fait ça, mais il faut lui passer les positions (x,z) et les paramètres du canal microfluidique.
+    # il va falloir relier les positions (z,y) au temps de réaction, d'une façon ou d'une autre...
+    for frame_group, data in res.items():
+        positions = data['position']
+        position = [positions['samty'], positions['difftz']]
+
+        time_value = convert_position_to_time(
+            position,
+            position0=position0,
+            debit=debit,
+            tol=tol
+        )
+
+        print(
+            f"Frames {frame_group:15s} | "
+            f"samty = {position[0]:8.3f} | "
+            f"difftz = {position[1]:8.3f} | "
+            f"time = {time_value:8.3f} s"
+        )
+    
+    # convert_position_to_time() est une fonction qui fait ça, mais il faut lui passer les positions (z,y) et les paramètres du canal microfluidique.
+    
+    
+    
     reaction_time = {}
     for frame_group, data in res.items():
-        scanned_motors = res[frame_group]['position'] 
-        for key, value in scanned_motors.items():
-            if 'y' in key.lower():
-                y_motor = value
-            else:
-                y_motor = position0[1]
-            if 'z' in key.lower():
-                z_motor = value
-            else:
-                z_motor = position0[1] 
-        position = [y_motor, z_motor]
+        positions = data['position']
 
-        reaction_time[frame_group] = convert_position_to_time(position, position0=position0, x_coude=x_coude, z_retour=z_retour, debit=debit, section=section, long_tri=long_tri, section_tri=section_tri, tol=tol)  # Implement this function based on your experimental setup
+        # convert_position_to_time attend (y, z)
+        position = [
+            positions['samty'],
+            positions['difftz']
+        ]
+
+        reaction_time[frame_group] = convert_position_to_time(
+            position,
+            position0=position0,
+            debit=debit,
+            tol=tol
+        )
 
     peak_evolution = {}
     for frame_group, data in res.items():
@@ -601,7 +647,7 @@ def process_stop_flow(file,
                       rpoly=0.9,
                       entry_sample=None,
                       entry_ref=None,
-                      motor_names=('difftz', 'samty', 'samtz'),
+                      motor_names=('difftz', 'samty'),
                       position_tol=0.05
                       ):
     """
@@ -700,6 +746,20 @@ def process_stop_flow(file,
         frame_arg = bin_idx
         sample_processor = XRDProcessor(file, frame=frame_arg, poni_file=poni_file,
                                         mask=mask_file, polarization_factor=polarization, entry=entry_sample)
+
+        path_sf = Path(file)
+
+        # Extraction du préfixe du sample
+        sample_name = path_sf.stem.split("_sf")[0]
+
+        # Reconstruction du chemin
+        filez2 = (
+            path_sf.parent.parent
+            / f"{sample_name}_scan_z2"
+            / f"{sample_name}_scan_z2.h5"
+        )
+
+        processor_scansz2 = XRDProcessor(filez2, poni_file=poni_file, mask=mask_file, polarization_factor=polarization, entry=entry_sample)
         
         if ref_file is not None:
             frame_arg_ref = ref_frame_map.get(bin_idx, bin_idx)
@@ -715,7 +775,7 @@ def process_stop_flow(file,
         outputfile = f'{os.path.dirname(file)}/{os.path.basename(file).split(".")[0]}_frames={frame_str}.gr'
         timedict={}
 
-        reaction_time =compute_reaction_time_stop_flow(sample_processor)
+        reaction_time =compute_reaction_time_stop_flow(sample_processor, processor_scansz2)
         for i, frame in enumerate(frame_group):
             timedict[str(frame)] = reaction_time[i]
 
@@ -746,7 +806,7 @@ def process_stop_flow(file,
         plt.legend()
     return pdf_files, res
 
-def compute_reaction_time_stop_flow(processor):
+def compute_reaction_time_stop_flow(processor,processor_scansz2, t0=14.11142):
     """
     Compute the reaction time for a stop-flow experiment based on the scanned motor positions.
 
@@ -754,6 +814,10 @@ def compute_reaction_time_stop_flow(processor):
     ----------
     processor : XRDProcessor
         The XRDProcessor object containing the scanned motor positions.
+    processor_scansz2 : XRDProcessor
+        utilisé pour récupérer l'epoch de fin d'acquisition du dernier scan, pour pouvoir calculer le temps de réaction à partir de l'epoch de début d'acquisition du scan.
+    t0 : float
+        Le temps initial à ajouter au temps de réaction calculé (correspond au temps de parcours total lost flow)
 
     Returns
     -------
@@ -761,19 +825,24 @@ def compute_reaction_time_stop_flow(processor):
         Dictionary containing the reaction time for each frame group.
         reaction_time[frame_group] = time_value
     """
-    epoch_trig_array = processor.times.get('epoch_trig')
+    time_travel = processor.times.get('epoch')[0] - processor_scansz2.times.get('epoch')[-1]
+    #print("Time travel (s) :", time_travel)
+
+
+    epoch_trig_array = processor.times.get('epoch')
     if epoch_trig_array is None:
-        raise ValueError("The 'epoch_trig' motor is not found in the processor's times.")
+        raise ValueError("The 'epoch' motor is not found in the processor's times.")
     else: 
         reaction_time = [0] * len(epoch_trig_array)
         for i, epoch_trig in enumerate(epoch_trig_array):
             # Assuming the first frame corresponds to time zero
             time_value = epoch_trig - epoch_trig_array[0]
-            reaction_time[i] = time_value    
+            reaction_time[i] = time_value  + time_travel + t0  # Adjusting with t0 to set the initial time  
     return reaction_time
 
 
 def monitor_pdf_peaks_stop_flow(file,
+                                #filez2, # fichier du scan de référence pour récupérer l'epoch de fin d'acquisition du dernier scan, pour pouvoir calculer le temps de réaction à partir de l'epoch de début d'acquisition du scan.
                       ref_file=None,
                       poni_file=None,
                       mask_file=None,
@@ -858,8 +927,23 @@ def monitor_pdf_peaks_stop_flow(file,
 
     processor = XRDProcessor(file, frame=0, poni_file=poni_file,
                                         mask=mask_file, polarization_factor=polarization, entry=entry_sample)
+
+    path_sf = Path(file)
+
+    # Extraction du préfixe du sample
+    sample_name = path_sf.stem.split("_sf")[0]
+
+    # Reconstruction du chemin
+    filez2 = (
+        path_sf.parent.parent
+        / f"{sample_name}_scan_z2"
+        / f"{sample_name}_scan_z2.h5"
+    )
     
-    reaction_time = compute_reaction_time_stop_flow(processor) # ndarray of corresponding reaction time for each frame
+    processor_scanz2 = XRDProcessor(filez2, frame=0, poni_file=poni_file,
+                                            mask=mask_file, polarization_factor=polarization, entry=entry_sample)
+    
+    reaction_time = compute_reaction_time_stop_flow(processor, processor_scanz2) # ndarray of corresponding reaction time for each frame
 
     peak_evolution = {}
     i=0

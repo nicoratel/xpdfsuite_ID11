@@ -7,8 +7,8 @@ import h5py
 # Please change  _MOTOR_KEY_ALIASES to match as desired for your specific beamline or detector. The current aliases are generic and may not match your data files.
 _MOTOR_KEY_ALIASES = {
     'motor_x': ('samx', 'sample_x', 'pos_x', 'motor_x','diffrx'),
-    'motor_y': ('samy', 'sample_y', 'pos_y', 'motor_y','diffry'),
-    'motor_z': ('samz', 'sample_z', 'pos_z', 'motor_z','diffrz'),
+    'motor_y': ('samty', 'sample_y', 'pos_y', 'motor_y','diffry'),
+    'motor_z': ('samz', 'sample_z', 'pos_z', 'motor_z','difftz'),
 }
 
 

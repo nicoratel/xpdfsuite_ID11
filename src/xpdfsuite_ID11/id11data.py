@@ -14,7 +14,7 @@ os.environ['HDF5_PLUGIN_PATH'] = hdf5plugin.PLUGIN_PATH
 MOTOR_NAMES = ['samtx', 'samty', 'samtz', 'difftz', 'diffty', 'diffrz']
 
 # Champs NXdetector usuels (convention NeXus/bliss) pouvant être présents
-# directement sous 'instrument/eiger'. Les champs absents restent à None.
+# directement sous 'instrument/eiger'. Les champs absents restent à None.self.normalize
 DETECTOR_INFO_KEYS = [
     'x_pixel_size', 'y_pixel_size', 'pixel_size',
     'distance', 'beam_center_x', 'beam_center_y',
@@ -44,7 +44,7 @@ class ID11Data:
         frame_norm = frame * dose_ref / dose_i
 
     avec ``dose_i = I_i * t_i`` (courant pico4 x temps d'exposition), ou
-    ``dose_i = I_i`` si ``integrated=True`` (fpico4 déjà intégré sur l'exposition).
+    ``dose_i = I_i`` si ``integrated=True`` (pico4 déjà intégré sur l'exposition).
     ``dose_ref`` est la dose moyenne sur toutes les entries, ce qui conserve
     l'ordre de grandeur des coups et permet de comparer les entries entre elles.
 
@@ -55,7 +55,7 @@ class ID11Data:
     normalize : bool
         Applique la normalisation par la dose dans get_frame / iter_frames.
     integrated : bool
-        True si fpico4 est une charge/un nombre de coups déjà intégré sur le temps
+        True si pico4 est une charge/un nombre de coups déjà intégré sur le temps
         d'exposition (on ne multiplie alors pas par t). False si c'est un courant moyen.
     """
 
@@ -133,7 +133,7 @@ class ID11Data:
     # ------------------------------------------------------------------
     def get_monitor(self, entry):
         """Signal pico4 par frame (1D float64), ou None si absent / invalide."""
-        node = self.h5_file.get(f'{entry}/measurement/fpico4')
+        node = self.h5_file.get(f'{entry}/measurement/pico4')
         if node is None:
             return None
         mon = np.asarray(node[()], dtype=np.float64)
@@ -162,7 +162,7 @@ class ID11Data:
         return None
 
     def get_dose(self, entry):
-        """Dose relative reçue par frame : I_i * t_i (ou I_i si fpico4 est intégré)."""
+        """Dose relative reçue par frame : I_i * t_i (ou I_i si pico4 est intégré)."""
         mon = self.monitor.get(entry) if hasattr(self, 'monitor') else self.get_monitor(entry)
         if mon is None:
             return None
@@ -330,7 +330,7 @@ class ID11Data:
             'sample_name': _decode(g['sample/name']) if 'sample' in g and 'name' in g['sample'] else None,
         }
 
-        for key in ['epoch_trig', 'sec', 'timer_raw', 'timer_delta', 'timer_period', 'timer_trig']:
+        for key in ['epoch', 'sec', 'timer_raw', 'timer_delta', 'timer_period', 'timer_trig']:
             if key in inst and 'data' in inst[key]:
                 meta[key] = inst[key]['data'][()]
 
